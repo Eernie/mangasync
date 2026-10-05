@@ -165,3 +165,34 @@ func TestSyncSeriesStopsWhenContextCancelled(t *testing.T) {
 		t.Fatal("no tracker should be touched after cancellation")
 	}
 }
+
+// errorCounter is a slog handler that records the messages of Error records.
+type errorCounter struct{ msgs *[]string }
+
+func (h errorCounter) Enabled(context.Context, slog.Level) bool { return true }
+func (h errorCounter) Handle(_ context.Context, r slog.Record) error {
+	if r.Level >= slog.LevelError {
+		*h.msgs = append(*h.msgs, r.Message)
+	}
+	return nil
+}
+func (h errorCounter) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h errorCounter) WithGroup(string) slog.Handler      { return h }
+
+func TestReaderFailuresAreLoggedOnceAtError(t *testing.T) {
+	for name, rd := range map[string]*coretest.FakeReader{
+		"get series":   {ReaderName: "komga", Series: map[string]core.Series{}},
+		"get progress": {ReaderName: "komga", Series: map[string]core.Series{"S1": {Ref: "S1", Title: "X"}}, Progress: map[string]core.ReadProgress{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var msgs []string
+			s := &Syncer{Reader: rd, Store: newStore(t), Log: slog.New(errorCounter{&msgs})}
+			if err := s.SyncSeries(t.Context(), "S1"); err == nil {
+				t.Fatal("want an error")
+			}
+			if len(msgs) != 1 {
+				t.Fatalf("Error records = %v, want exactly one", msgs)
+			}
+		})
+	}
+}

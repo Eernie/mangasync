@@ -363,3 +363,48 @@ func TestResumeRespectsDryRunAndKeepsRecordOnError(t *testing.T) {
 		t.Fatal("dry run must neither acquire nor change the record")
 	}
 }
+
+// errorCounter is a slog handler that records the messages of Error records.
+type errorCounter struct{ msgs *[]string }
+
+func (h errorCounter) Enabled(context.Context, slog.Level) bool { return true }
+func (h errorCounter) Handle(_ context.Context, r slog.Record) error {
+	if r.Level >= slog.LevelError {
+		*h.msgs = append(*h.msgs, r.Message)
+	}
+	return nil
+}
+func (h errorCounter) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h errorCounter) WithGroup(string) slog.Handler      { return h }
+
+type failingLister struct{ *coretest.FakeTracker }
+
+func (failingLister) ListLibrary(context.Context, []core.Status) ([]core.LibraryEntry, error) {
+	return nil, errors.New("boom")
+}
+
+type failingReader struct{ *coretest.FakeReader }
+
+func (failingReader) ListAllSeries(context.Context) ([]core.Series, error) {
+	return nil, errors.New("boom")
+}
+
+func TestListFailuresAreLoggedOnceAtError(t *testing.T) {
+	for name, tweak := range map[string]func(*Syncer){
+		"list tracker library": func(s *Syncer) { s.Lister = failingLister{s.Tracker.(*coretest.FakeTracker)} },
+		"list reader series":   func(s *Syncer) { s.Reader = failingReader{s.Reader.(*coretest.FakeReader)} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			fx := newFixture(t)
+			var msgs []string
+			fx.s.Log = slog.New(errorCounter{&msgs})
+			tweak(fx.s)
+			if err := fx.s.Run(t.Context()); err == nil {
+				t.Fatal("want an error")
+			}
+			if len(msgs) != 1 {
+				t.Fatalf("Error records = %v, want exactly one", msgs)
+			}
+		})
+	}
+}

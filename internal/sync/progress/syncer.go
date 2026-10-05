@@ -29,10 +29,12 @@ type Syncer struct {
 func (s *Syncer) SyncSeries(ctx context.Context, ref string) error {
 	series, err := s.Reader.GetSeries(ctx, ref)
 	if err != nil {
+		s.Log.Error("progress sync failed", "ref", ref, "step", "get series", "err", err)
 		return fmt.Errorf("get series %s: %w", ref, err)
 	}
 	prog, err := s.Reader.GetProgress(ctx, ref)
 	if err != nil {
+		s.Log.Error("progress sync failed", "ref", ref, "step", "get progress", "err", err)
 		return fmt.Errorf("get progress %s: %w", ref, err)
 	}
 	var errs []error

@@ -102,9 +102,11 @@ func run() error {
 	}
 
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: healthHandler(), ReadHeaderTimeout: 5 * time.Second}
+	srvErr := make(chan error, 1)
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error("health server failed", "err", err)
+			srvErr <- err
 			stop()
 		}
 	}()
@@ -112,11 +114,18 @@ func run() error {
 	log.Info("mangasync started", "reader", cfg.Reader, "trackers", cfg.Trackers,
 		"download_tracker", cfg.DownloadTracker, "downloader", cfg.Downloader, "dry_run", cfg.DryRun)
 	a.Run(ctx)
+	stop() // restore default signal handling so a second SIGTERM/Ctrl-C kills a stuck shutdown
 	log.Info("shutting down")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return srv.Shutdown(shutdownCtx)
+	shutdownErr := srv.Shutdown(shutdownCtx)
+	select {
+	case err := <-srvErr:
+		return fmt.Errorf("health server: %w", err)
+	default:
+	}
+	return shutdownErr
 }
 
 func healthHandler() http.Handler {

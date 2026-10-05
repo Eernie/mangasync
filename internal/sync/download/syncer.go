@@ -47,11 +47,13 @@ func (s *Syncer) Run(ctx context.Context) error {
 	}
 	entries, err := s.Lister.ListLibrary(ctx, statuses)
 	if err != nil {
+		s.Log.Error("download sync failed", "step", "list tracker library", "err", err)
 		return fmt.Errorf("list tracker library: %w", err)
 	}
 	var readerSeries []core.Series
 	if len(s.Acquire) > 0 {
 		if readerSeries, err = s.Reader.ListAllSeries(ctx); err != nil {
+			s.Log.Error("download sync failed", "step", "list reader series", "err", err)
 			return fmt.Errorf("list reader series: %w", err)
 		}
 	}
