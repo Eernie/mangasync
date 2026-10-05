@@ -22,6 +22,7 @@ type Syncer struct {
 	Log            *slog.Logger
 	Now            func() time.Time // nil = time.Now
 	UnmatchedRetry time.Duration    // 0 = 24h
+	Location       *time.Location   // time zone for start/finish dates; nil = time.Local (ComputeTarget handles nil)
 }
 
 // SyncSeries syncs one reader series. A failing tracker is logged and does not stop the others;
@@ -64,7 +65,7 @@ func (s *Syncer) syncTracker(ctx context.Context, series core.Series, prog core.
 			return fmt.Errorf("series ended: %w", err)
 		}
 	}
-	target := ComputeTarget(prog, ended, nil)
+	target := ComputeTarget(prog, ended, s.Location)
 	if target == nil {
 		return nil
 	}

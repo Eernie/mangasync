@@ -196,3 +196,40 @@ func TestReaderFailuresAreLoggedOnceAtError(t *testing.T) {
 		})
 	}
 }
+
+func TestSyncWritesStartDateInConfiguredLocation(t *testing.T) {
+	loc, err := time.LoadLocation("Pacific/Kiritimati") // UTC+14, never the same date as UTC at noon
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC) // 2026-06-18 02:00 in Kiritimati
+	tr := &coretest.FakeTracker{TrackerName: "mangabaka", IDsByRef: map[string]string{"S1": "1"}}
+	s := &Syncer{Reader: reader(core.ReadProgress{Unit: core.UnitChapter, BooksTotal: 10, BooksRead: 2, LastReadNumber: 2, FirstReadAt: first, LastReadAt: first}),
+		Trackers: []core.Tracker{tr}, Store: newStore(t), Log: quietLog(), Location: loc}
+	if err := s.SyncSeries(t.Context(), "S1"); err != nil {
+		t.Fatal(err)
+	}
+	saved := tr.SavedEntries()
+	if len(saved) != 1 || saved[0].Update.StartDate == nil || *saved[0].Update.StartDate != "2026-06-18" {
+		t.Fatalf("saved = %+v", saved)
+	}
+	if saved[0].Update.FinishDate != nil {
+		t.Errorf("finish date = %q, want none for a reading target", *saved[0].Update.FinishDate)
+	}
+}
+
+func TestSyncFillsMissingStartDateOnUpToDateEntry(t *testing.T) {
+	first := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
+	ch := 2.0
+	tr := &coretest.FakeTracker{TrackerName: "mangabaka", IDsByRef: map[string]string{"S1": "1"},
+		Entries: map[string]*core.Entry{"1": {Status: core.StatusReading, Chapter: &ch}}}
+	s := &Syncer{Reader: reader(core.ReadProgress{Unit: core.UnitChapter, BooksTotal: 10, BooksRead: 2, LastReadNumber: 2, FirstReadAt: first}),
+		Trackers: []core.Tracker{tr}, Store: newStore(t), Log: quietLog(), Location: time.UTC}
+	if err := s.SyncSeries(t.Context(), "S1"); err != nil {
+		t.Fatal(err)
+	}
+	saved := tr.SavedEntries()
+	if len(saved) != 1 || *saved[0].Update.StartDate != "2026-06-17" || saved[0].Update.Status != nil || saved[0].Update.Chapter != nil {
+		t.Fatalf("saved = %+v", saved)
+	}
+}
