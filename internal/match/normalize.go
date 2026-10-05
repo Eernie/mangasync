@@ -2,6 +2,7 @@
 package match
 
 import (
+	"slices"
 	"strings"
 	"unicode"
 
@@ -11,13 +12,20 @@ import (
 // Normalize lowercases s and reduces it to letters, digits and single spaces so that
 // differently punctuated titles compare equal. Apostrophes are dropped ("Journey's" ==
 // "Journeys"); every other non-alphanumeric rune (including "_" from filesystem names)
-// becomes a space. A leading "the" or "a" is dropped.
+// becomes a space. Accents on Latin letters are folded away. A leading "the" or "a" is dropped.
 func Normalize(s string) string {
 	s = strings.ToLower(norm.NFKC.String(s))
 	var b strings.Builder
 	for _, r := range s {
 		switch {
 		case r == '\'' || r == '’' || r == '‘' || r == '`':
+		case unicode.Is(unicode.Latin, r):
+			// Fold Latin accents ("ō" -> "o"); other scripts keep their marks (kana dakuten).
+			for _, d := range norm.NFD.String(string(r)) {
+				if !unicode.Is(unicode.Mn, d) {
+					b.WriteRune(d)
+				}
+			}
 		case unicode.IsLetter(r) || unicode.IsNumber(r):
 			b.WriteRune(r)
 		default:
@@ -33,6 +41,7 @@ func Normalize(s string) string {
 
 // Similarity returns 1 − Levenshtein distance / longer length of the normalized strings.
 // Titles that are equal after removing spaces ("LOSTEND" / "Lost End") score 1.
+// Titles whose number tokens differ ("Kaiju No. 8" / "Kaiju No. 9") score at most 0.5.
 func Similarity(a, b string) float64 {
 	na, nb := Normalize(a), Normalize(b)
 	if na == "" || nb == "" {
@@ -42,7 +51,26 @@ func Similarity(a, b string) float64 {
 		return 1
 	}
 	ra, rb := []rune(na), []rune(nb)
-	return 1 - float64(levenshtein(ra, rb))/float64(max(len(ra), len(rb)))
+	score := 1 - float64(levenshtein(ra, rb))/float64(max(len(ra), len(rb)))
+	if !slices.Equal(numberTokens(na), numberTokens(nb)) {
+		score = min(score, 0.5)
+	}
+	return score
+}
+
+// romanNumerals are the Roman numeral words treated as numbers. "i", "v" and "x" are
+// left out because they occur as ordinary words ("Hunter x Hunter").
+var romanNumerals = map[string]bool{"ii": true, "iii": true, "iv": true, "vi": true, "vii": true, "viii": true, "ix": true}
+
+// numberTokens returns, in order, the words of a normalized title that are numbers.
+func numberTokens(normalized string) []string {
+	var out []string
+	for _, w := range strings.Fields(normalized) {
+		if romanNumerals[w] || strings.IndexFunc(w, func(r rune) bool { return !unicode.IsDigit(r) }) < 0 {
+			out = append(out, w)
+		}
+	}
+	return out
 }
 
 func levenshtein(a, b []rune) int {
