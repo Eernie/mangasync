@@ -1,6 +1,7 @@
 package komga
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,6 +24,8 @@ const seriesS1 = `{"id":"S1","libraryId":"L1","name":"Chainsaw Man","metadata":{
 
 const seriesS2 = `{"id":"S2","libraryId":"L2","name":"LOSTEND","metadata":{"title":"","alternateTitles":[],"links":[]}}`
 
+const seriesS3 = `{"id":"S3","libraryId":"L1","name":"Gone","deleted":true,"metadata":{"title":"Gone","alternateTitles":[],"links":[]}}`
+
 const progressS1 = `{"booksCount":244,"booksReadCount":104,"booksUnreadCount":139,"booksInProgressCount":1,
 "lastReadContinuousNumberSort":104.0,"maxNumberSort":232.0}`
 
@@ -30,6 +33,7 @@ type server struct {
 	*httptest.Server
 	mu         sync.Mutex
 	listBodies []string
+	getHits    int
 }
 
 func newServer(t *testing.T) *server {
@@ -44,9 +48,12 @@ func newServer(t *testing.T) *server {
 		s.mu.Lock()
 		s.listBodies = append(s.listBodies, string(b))
 		s.mu.Unlock()
-		fmt.Fprintf(w, `{"content":[%s,%s]}`, seriesS1, seriesS2)
+		fmt.Fprintf(w, `{"content":[%s,%s,%s]}`, seriesS1, seriesS2, seriesS3)
 	})
 	mux.HandleFunc("GET /api/v1/series/{id}", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		s.getHits++
+		s.mu.Unlock()
 		switch r.PathValue("id") {
 		case "S1":
 			io.WriteString(w, seriesS1)
@@ -126,7 +133,19 @@ func TestGetProgress(t *testing.T) {
 	if p != want {
 		t.Errorf("progress = %+v, want %+v", p, want)
 	}
+	srv.mu.Lock()
+	hits := srv.getHits
+	srv.mu.Unlock()
+	if hits != 0 {
+		t.Errorf("GetSeries hits without volume libraries = %d, want 0", hits)
+	}
 	p, _ = newClient(srv.URL, "L1").GetProgress(t.Context(), "S1")
+	srv.mu.Lock()
+	hits = srv.getHits
+	srv.mu.Unlock()
+	if hits != 1 {
+		t.Errorf("GetSeries hits with volume libraries = %d, want 1", hits)
+	}
 	if p.Unit != core.UnitVolume {
 		t.Errorf("volume library: unit = %q", p.Unit)
 	}
@@ -137,5 +156,25 @@ func TestBadKey(t *testing.T) {
 	c := New(Config{URL: srv.URL, APIKey: "wrong"}, httpx.New(5*time.Second, 0))
 	if _, err := c.GetSeries(t.Context(), "S1"); !httpx.IsStatus(err, http.StatusUnauthorized) {
 		t.Fatalf("err = %v, want 401", err)
+	}
+}
+
+func TestListSkipsDeleted(t *testing.T) {
+	c := newClient(newServer(t).URL)
+	for name, fn := range map[string]func(context.Context) ([]core.Series, error){
+		"started": c.ListStartedSeries, "all": c.ListAllSeries,
+	} {
+		got, err := fn(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 2 {
+			t.Errorf("%s: got %d series, want 2 (S3 is deleted)", name, len(got))
+		}
+		for _, s := range got {
+			if s.Ref == "S3" {
+				t.Errorf("%s: deleted series returned", name)
+			}
+		}
 	}
 }

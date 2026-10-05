@@ -47,6 +47,7 @@ type seriesDTO struct {
 	ID        string `json:"id"`
 	LibraryID string `json:"libraryId"`
 	Name      string `json:"name"`
+	Deleted   bool   `json:"deleted"` // soft-deleted: files are gone
 	Metadata  struct {
 		Title           string `json:"title"`
 		AlternateTitles []struct {
@@ -83,6 +84,9 @@ func (c *Client) list(ctx context.Context, body any) ([]core.Series, error) {
 	}
 	out := make([]core.Series, 0, len(page.Content))
 	for _, d := range page.Content {
+		if d.Deleted {
+			continue
+		}
 		out = append(out, d.toCore())
 	}
 	return out, nil

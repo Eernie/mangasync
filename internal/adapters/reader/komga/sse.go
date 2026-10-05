@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"strings"
 )
@@ -27,6 +28,10 @@ func (c *Client) WatchProgress(ctx context.Context) (<-chan string, error) {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		resp.Body.Close()
 		return nil, fmt.Errorf("komga events: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	if mt, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err != nil || mt != "text/event-stream" {
+		resp.Body.Close()
+		return nil, fmt.Errorf("komga events: unexpected Content-Type %q (not an event stream; proxy or SSO page?)", resp.Header.Get("Content-Type"))
 	}
 	ch := make(chan string, 16)
 	go func() {
