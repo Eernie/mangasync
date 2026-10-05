@@ -1,7 +1,7 @@
 # MangaSync — Design
 
 Date: 2026-10-05
-Status: Approved for planning (rev 2: pluggable providers)
+Status: Approved for planning (rev 3: validated against live Komga/Suwayomi/MangaBaka on 2026-10-05)
 
 ## Goal
 
@@ -33,7 +33,7 @@ Non-goals (v1): two-way sync (Tracker → Reader), syncing ratings/notes/dates, 
 
 ```go
 // IDKind names an external database a series can be identified by.
-type IDKind string // "mangabaka", "anilist", "mal", "mangaupdates", "kitsu", "animeplanet", "ann"
+type IDKind string // "mangabaka", "anilist", "mal", "mangaupdates", "kitsu", "animeplanet", "ann", "mangadex"
 
 type IDs map[IDKind]string
 
@@ -90,6 +90,9 @@ type Tracker interface {
     // Resolve finds this tracker's series ID for a reader series, using s.IDs first
     // (direct ID, then cross-reference lookup) and title search last.
     Resolve(ctx context.Context, s Series) (id string, found bool, err error)
+    // SeriesEnded reports whether publication has finished (completed or cancelled).
+    // Used to tell "finished the series" apart from "caught up on an ongoing series".
+    SeriesEnded(ctx context.Context, id string) (bool, error)
     GetEntry(ctx context.Context, id string) (*Entry, error) // nil, nil if not in the user's list
     SaveEntry(ctx context.Context, id string, u EntryUpdate) error // create or partial update
 }
@@ -135,8 +138,11 @@ For one reader series, for each tracker in `TRACKERS` (failures in one tracker d
 
 1. **Resolve** the tracker ID: cached in store → else `tracker.Resolve(series)`. Not found → store `unmatched`, retry at most once per 24h.
 2. **Target** from `ReadProgress`:
-   - `BooksRead == BooksTotal > 0` → `completed`, progress = `MaxNumber`.
+   - `BooksRead == BooksTotal > 0` and `tracker.SeriesEnded` → `completed`, progress = `MaxNumber`.
+   - `BooksRead == BooksTotal > 0`, series still publishing → `reading`, progress = `MaxNumber` (caught up).
    - `BooksRead > 0` → `reading`, progress = `LastReadNumber`.
+   - Publication status comes from the tracker, not the reader: Komga's `metadata.status` defaults to `ONGOING` for series without metadata (seen live on finished series), so it can't be trusted.
+   - `BooksTotal` can exceed `MaxNumber` (duplicate scanlations, chapter 0), so "all read" uses the book counts and progress uses the numbers.
    - else → no action.
    - Progress goes in `Chapter` or `Volume` per `ReadProgress.Unit`.
 3. **Decide** against the current entry (`GetEntry`):
@@ -160,10 +166,10 @@ Series that leave planning are ignored; `done` records stay.
 
 ## Matching (`internal/match`, shared by adapters)
 
-- `Normalize`: lowercase, Unicode NFKC, strip punctuation/brackets, collapse whitespace, drop leading "the"/"a".
+- `Normalize`: lowercase, Unicode NFKC, map `_`, `-`, `–`, `—`, `:` to spaces, drop apostrophes (`'`, `’`), strip remaining punctuation/brackets, collapse whitespace, drop leading "the"/"a". Komga folder names replace `:` with `_` (e.g. `Naruto_ Sasuke's Story - The Uchiha and the Heavenly Stardust_ The Manga` must match MangaBaka's `Naruto: Sasuke’s Story—The Uchiha and the Heavenly Stardust: The Manga`).
 - `Similarity`: 1 − Levenshtein/maxLen on normalized strings; exact match = 1.0.
 - `Best(titles []string, candidates) (best, nearMisses)`: max similarity of each candidate against all titles; accept if ≥ `MATCH_THRESHOLD` (default 0.9).
-- `ParseLink(url) (IDKind, id, ok)`: recognizes URLs for mangabaka.org, anilist.co, myanimelist.net, mangaupdates.com, kitsu.app/kitsu.io, anime-planet.com, animenewsnetwork.com.
+- `ParseLink(url) (IDKind, id, ok)`: recognizes URLs for mangabaka.org, anilist.co, myanimelist.net, mangaupdates.com (base36 ID, e.g. `/series/ylx5wzn/…`), kitsu.app/kitsu.io, anime-planet.com (slug), animenewsnetwork.com, mangadex.org (UUID; `IDKind` `mangadex`, not used by MangaBaka but kept for future adapters). Unrecognized links (Amazon, BookWalker, official sites) are ignored.
 
 ## State (SQLite at `DB_PATH`)
 
@@ -204,22 +210,24 @@ Adapter-specific vars are prefixed with the adapter name and only read when that
 
 ### Reader `komga` (implements `Reader`, `ProgressWatcher`)
 
-Env: `KOMGA_URL`, `KOMGA_API_KEY`, optional `KOMGA_USER`/`KOMGA_PASS` (SSE fallback), `KOMGA_VOLUME_LIBRARIES` (comma-separated library IDs whose books are volumes).
+Env: `KOMGA_URL`, `KOMGA_API_KEY`, `KOMGA_VOLUME_LIBRARIES` (comma-separated library IDs whose books are volumes; default empty = all chapters).
 
 - Auth header `X-API-Key`.
 - `ListStartedSeries`: `POST /api/v1/series/list?unpaged=true` with condition `anyOf readStatus is IN_PROGRESS / READ`.
-- `GetSeries`: `GET /api/v1/series/{id}` → title, `metadata.alternateTitles`, `libraryId`; `IDs` from `metadata.links[].url` via `match.ParseLink` (Komf writes `MangaBaka`, `AniList`, `MangaUpdates`, `MyAnimeList`, `Kitsu`, `AnimePlanet`, `AnimeNewsNetwork` links).
+- `GetSeries`: `GET /api/v1/series/{id}` → `metadata.title`, `metadata.alternateTitles`, `libraryId`; `IDs` from `metadata.links[].url` via `match.ParseLink`. Parse by URL, not label: live labels are `AniList`, `MangaUpdates`, `MyAnimeList`, `Kitsu`, `Anime-Planet`, `MangaDex`, plus shop/official links to ignore. No `MangaBaka` links exist on the live instance, and 16 of 28 series have no links at all, so title search is a primary path, not an edge case.
 - `GetProgress`: `GET /api/v2/series/{id}/read-progress/tachiyomi` → `lastReadContinuousNumberSort`, `maxNumberSort`, `booksCount`, `booksReadCount`. Unit = volume if library in `KOMGA_VOLUME_LIBRARIES`, else chapter.
-- `WatchProgress`: SSE `GET /sse/v1/events`; emit `seriesId` from `ReadProgressSeriesChanged` / `ReadProgressSeriesDeleted`. Events are delivered only to the owning user. If the API key is rejected on SSE, log in with basic auth and use the `X-Auth-Token` session.
+- `WatchProgress`: SSE `GET /sse/v1/events` with `X-API-Key` (verified: 200, `text/event-stream`). Format is `event:<Type>\ndata:<json>\n\n`; ignore other types (e.g. `TaskQueueStatus`). Emit `seriesId` from `ReadProgressSeriesChanged` / `ReadProgressSeriesDeleted`. Events are delivered only to the owning user, so the API key must belong to the reading user.
 
 ### Tracker `mangabaka` (implements `Tracker`, `PlanningLister`)
 
 Env: `MANGABAKA_TOKEN` (Personal Access Token, `mb-…`).
 
 - Base `https://api.mangabaka.org`, header `x-api-key`, responses `{status, data, pagination?}`.
-- `Resolve`: `IDs["mangabaka"]` → done; else first of anilist / mangaupdates / mal / kitsu / animeplanet → `GET /v1/source/{anilist|manga-updates|my-anime-list|kitsu|anime-planet}/{id}`; else `GET /v1/series/search?q=` + `match.Best`. Follow `merged_with` on merged series.
+- `Resolve`: `IDs["mangabaka"]` → done; else first of anilist / mangaupdates / mal / kitsu / animeplanet → `GET /v1/source/{anilist|manga-updates|my-anime-list|kitsu|anime-planet}/{id}` (verified: returns `data.series[]`, take the first `active` one); else `GET /v1/series/search?q=` + `match.Best` against `title`, `romanized_title` and `secondary_titles.*[].title`. Search returns near-duplicates (e.g. two Sasuke's Story entries), so `Best` must pick the highest score, not the first hit. Follow `merged_with` on merged series.
+- `SeriesEnded`: `GET /v1/series/{id}` → `status` in {`completed`, `cancelled`}. Enum: `cancelled, completed, hiatus, releasing, unknown, upcoming`. Cached in memory for the reconcile interval.
 - `GetEntry`: `GET /v1/my/library/{id}` (404 → nil). `SaveEntry`: `PATCH` (or `POST` if absent) with `state`, `progress_chapter`, `progress_volume`.
-- `ListPlanning`: `GET /v1/my/library?state=plan_to_read&limit=100` (paged) + series titles/alt titles/`source` IDs (`/v1/series/batch` if not embedded).
+- `ListPlanning`: `GET /v2/my/library?state=plan_to_read&limit=100` (paged). Must be v2: v1 list items carry no series ID. v2 items are `{entry, lists, series}` with the full series object (`id`, titles, `secondary_titles`, `source`).
+- Progress fields are JSON numbers with no `multipleOf` in the spec, so decimals (e.g. 10.5) are sent as-is. A submitted `0` is stored as null.
 - Status map: `plan_to_read`, `considering` → planning; `reading` → reading; `completed` → completed; `paused`, `on_hold` → paused; `dropped` → dropped; `rereading` → rereading; else unknown. Reverse: planning → `plan_to_read`.
 - Rate limits: search 25/min, others 150/min (API limits are 30 / 180 per IP).
 
@@ -229,8 +237,9 @@ Env: `SUWAYOMI_URL`, `SUWAYOMI_AUTH` (`none` | `basic` | `ui_login`), `SUWAYOMI_
 
 - GraphQL at `/api/graphql`, typed structs over `net/http`. `ui_login`: `login` mutation → Bearer access token (~5 min), refreshed via `refreshToken` mutation.
 - Startup: resolve `SUWAYOMI_SOURCES` names → IDs via `sources` query; fail on unknown names.
-- `Find`: for each source in order, `fetchSourceManga(type: SEARCH, query: title, page: 1)`; score with `match.Best` against title + alt titles; first source with an accepted candidate wins. If nothing matches on the main title, repeat once with the first English alt title.
+- `Find`: for each source in order, `fetchSourceManga(type: SEARCH, query: title, page: 1)`; score with `match.Best` against title + all alt titles; first source with an accepted candidate wins. If nothing matches on the main title, repeat once with the first English alt title. Alt titles are essential: sources use English titles (Weeb Central returns `Frieren - Beyond Journey's End`) while MangaBaka's main title may be romaji.
 - `Acquire`: `updateManga(patch:{inLibrary:true})` if not in library → `fetchChapters` → `enqueueChapterDownloads` for chapters with `isDownloaded == false`.
+- Live instance: v2.4.2378 (Preview), auth `none`, installed sources `Weeb Central (EN)`, `ManhuaTop (EN)`, `Webdex Scans (EN)`. The existing 28-series library all comes from Weeb Central.
 
 ## Future adapters (shape check only, not built in v1)
 
@@ -266,8 +275,20 @@ Expected shapes, to confirm when built: Kavita (REST + JWT/API key, SignalR hub 
 - **Adapter tests**: `httptest` servers with JSON fixtures shaped like real responses; each adapter also runs the `coretest` contract suite for its port, which future adapters reuse.
 - **Manual smoke**: `DRY_RUN=true` against the real instances before enabling writes.
 
-## Open items to verify early in implementation
+## Validation log (2026-10-05)
 
-1. Komga SSE accepts `X-API-Key` (else session fallback).
-2. Shape of MangaBaka `/v1/my/library` list items (where `series_id` / series object sit).
-3. Whether MangaBaka progress fields accept decimals (else floor).
+Read-only checks against the live instances; no writes were made.
+
+| Item | Result |
+|---|---|
+| Komga SSE with `X-API-Key` | Works (200, `text/event-stream`). Session fallback dropped. |
+| Komga tachiyomi progress endpoint | Works; shape as documented. |
+| Komga links | No MangaBaka links; AniList/MU/MAL/Kitsu/Anime-Planet/MangaDex on 12 of 28 series. |
+| Komga `metadata.status` | Unreliable (defaults to `ONGOING`); use tracker's publication status. |
+| Komga titles | Filesystem-mangled (`_` for `:`); handled in `Normalize`. |
+| MangaBaka list shape | v1 items lack series ID; use `/v2/my/library` (`{entry, lists, series}`). |
+| MangaBaka decimals | Allowed per OpenAPI (`number`, no `multipleOf`). Confirm on first real write. |
+| MangaBaka source lookup | `/v1/source/anilist/105778` → `data.series[0].id = 1677` (Chainsaw Man). |
+| Suwayomi auth / search / chapters | `none`; `fetchSourceManga` SEARCH works; `isDownloaded`, `downloadCount` present. |
+
+Remaining: the MangaBaka library was empty, so a real list response and a real `PATCH` are first exercised during the dry-run/first-write smoke test.
