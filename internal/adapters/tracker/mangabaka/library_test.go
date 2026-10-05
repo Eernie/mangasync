@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"mangasync/internal/core"
@@ -60,10 +61,9 @@ func TestListLibraryPagesAndMaps(t *testing.T) {
 }
 
 func TestListLibraryStopsAtCount(t *testing.T) {
-	pages := 0
+	var pages atomic.Int32
 	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		pages++
-		if pages > 3 { // let the loop end even if the client misbehaves
+		if pages.Add(1) > 3 { // let the loop end even if the client misbehaves
 			t.Error("kept paging past count")
 			io.WriteString(w, `{"status":200,"pagination":{"next":null},"data":[]}`)
 			return
@@ -73,8 +73,8 @@ func TestListLibraryStopsAtCount(t *testing.T) {
 			{"entry":{"series_id":2000,"state":"dropped"},"lists":[],"series":`+borutoV2+`}]}`)
 	}))
 	got, err := c.ListLibrary(t.Context(), []core.Status{core.StatusDropped})
-	if err != nil || len(got) != 1 || pages != 1 {
-		t.Fatalf("got %d entries, %d pages, err %v", len(got), pages, err)
+	if err != nil || len(got) != 1 || pages.Load() != 1 {
+		t.Fatalf("got %d entries, %d pages, err %v", len(got), pages.Load(), err)
 	}
 }
 

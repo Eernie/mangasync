@@ -233,3 +233,47 @@ func TestFollowMergedDeletedAndLoops(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveSearchSkipsDeletedAndFollowsMerged(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/series/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if r.PathValue("id") == "1677" {
+			io.WriteString(w, `{"status":200,"data":`+chainsaw+`}`)
+			return
+		}
+		http.NotFound(w, r)
+	})
+	mux.HandleFunc("GET /v1/series/search", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("q") {
+		case "Dead Exact":
+			io.WriteString(w, `{"status":200,"data":[
+				{"id":11,"state":"deleted","title":"Dead Exact"},
+				{"id":12,"state":"active","title":"Dead Exact"}]}`)
+		case "Merged Exact":
+			io.WriteString(w, `{"status":200,"data":[{"id":10,"state":"merged","merged_with":1677,"title":"Merged Exact"}]}`)
+		case "Merged Broken":
+			io.WriteString(w, `{"status":200,"data":[{"id":13,"state":"merged","merged_with":999,"title":"Merged Broken"}]}`)
+		case "Only Deleted":
+			io.WriteString(w, `{"status":200,"data":[{"id":11,"state":"deleted","title":"Only Deleted"}]}`)
+		default:
+			io.WriteString(w, `{"status":200,"data":[]}`)
+		}
+	})
+	c, _ := newTestClient(t, mux)
+	cases := []struct {
+		title  string
+		wantID string
+		found  bool
+	}{
+		{"Dead Exact", "12", true},
+		{"Merged Exact", "1677", true},
+		{"Merged Broken", "", false},
+		{"Only Deleted", "", false},
+	}
+	for _, tc := range cases {
+		id, found, err := c.Resolve(t.Context(), core.Series{Title: tc.title})
+		if err != nil || id != tc.wantID || found != tc.found {
+			t.Errorf("%s: got %q, %v, %v; want %q, %v", tc.title, id, found, err, tc.wantID, tc.found)
+		}
+	}
+}

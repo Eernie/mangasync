@@ -162,13 +162,6 @@ func rawID(r json.RawMessage) string {
 	return v
 }
 
-func (d seriesDTO) currentID() string {
-	if d.State == "merged" && d.MergedWith != nil {
-		return strconv.Itoa(*d.MergedWith)
-	}
-	return strconv.Itoa(d.ID)
-}
-
 func (c *Client) getSeries(ctx context.Context, id string) (seriesDTO, error) {
 	var env struct {
 		Data seriesDTO `json:"data"`
@@ -268,11 +261,18 @@ func (c *Client) searchTitle(ctx context.Context, s core.Series) (string, bool, 
 	if err := c.search.DoJSON(ctx, http.MethodGet, c.url("/v1/series/search?"+q.Encode()), c.header(), nil, &env); err != nil {
 		return "", false, fmt.Errorf("search %q: %w", s.Title, err)
 	}
-	best, _ := match.Best(s.Titles(), env.Data, func(d seriesDTO) []string { return d.toCore().Titles() }, c.cfg.Threshold)
+	hits := slices.DeleteFunc(env.Data, func(d seriesDTO) bool { return d.State == "deleted" })
+	best, _ := match.Best(s.Titles(), hits, func(d seriesDTO) []string { return d.toCore().Titles() }, c.cfg.Threshold)
 	if best == nil {
 		return "", false, nil
 	}
-	return best.Item.currentID(), true, nil
+	if best.Item.State == "merged" {
+		if best.Item.MergedWith == nil {
+			return "", false, nil
+		}
+		return c.followMerged(ctx, strconv.Itoa(*best.Item.MergedWith))
+	}
+	return strconv.Itoa(best.Item.ID), true, nil
 }
 
 // SeriesEnded reports whether publication is completed or cancelled. Cached for EndedTTL.
