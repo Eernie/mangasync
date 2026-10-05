@@ -1,6 +1,7 @@
 package mangabaka
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -78,6 +79,30 @@ func TestSeriesToCore(t *testing.T) {
 	}
 }
 
+func TestSeriesToCoreV2Titles(t *testing.T) {
+	var d seriesDTO
+	if err := json.Unmarshal([]byte(chainsawV2), &d); err != nil {
+		t.Fatal(err)
+	}
+	s := d.toCore()
+	if s.Title != "Chainsaw Man" || strings.Join(s.AltTitles, "|") != "Chain Saw Man|チェンソーマン" {
+		t.Errorf("primary: %+v", s)
+	}
+	// no is_primary: first English title wins; Latin-script alts come before other scripts.
+	d = seriesDTO{ID: 5, Titles: []v2TitleDTO{
+		{Language: "ja", Title: "ナルト"}, {Language: "fr", Title: "Naruto FR"}, {Language: "en", Title: "Naruto"},
+		{Language: "ko", Title: "나루토"}, {Language: "en", Title: "Naruto"}}}
+	s = d.toCore()
+	if s.Title != "Naruto" || strings.Join(s.AltTitles, "|") != "Naruto FR|ナルト|나루토" {
+		t.Errorf("fallback: %+v", s)
+	}
+	// no English at all: first entry.
+	d = seriesDTO{ID: 6, Titles: []v2TitleDTO{{Language: "ja", Title: "ナルト"}, {Language: "ko", Title: "나루토"}}}
+	if s = d.toCore(); s.Title != "ナルト" || len(s.AltTitles) != 1 || s.AltTitles[0] != "나루토" {
+		t.Errorf("no english: %+v", s)
+	}
+}
+
 func TestResolve(t *testing.T) {
 	c, rec := newTestClient(t, seriesHandler())
 	cases := []struct {
@@ -125,4 +150,86 @@ func TestSeriesEndedIsCached(t *testing.T) {
 func TestContract(t *testing.T) {
 	c, _ := newTestClient(t, seriesHandler())
 	coretest.TrackerContract(t, c, core.Series{Ref: "K1", Title: "Chainsaw Man", IDs: core.IDs{core.IDAniList: "105778"}}, "1677")
+}
+
+func TestResolveSourceLookupStates(t *testing.T) {
+	const deleted = `{"id":11,"state":"deleted","title":"Gone"}`
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/series/{id}", func(w http.ResponseWriter, r *http.Request) {
+		switch r.PathValue("id") {
+		case "1677":
+			io.WriteString(w, `{"status":200,"data":`+chainsaw+`}`)
+		case "2000":
+			io.WriteString(w, `{"status":200,"data":`+boruto+`}`)
+		case "10":
+			io.WriteString(w, `{"status":200,"data":`+merged+`}`)
+		case "11":
+			io.WriteString(w, `{"status":200,"data":`+deleted+`}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	mux.HandleFunc("GET /v1/source/anilist/{id}", func(w http.ResponseWriter, r *http.Request) {
+		switch r.PathValue("id") {
+		case "del-active":
+			io.WriteString(w, `{"status":200,"data":{"series":[`+deleted+`,`+boruto+`]}}`)
+		case "merged":
+			io.WriteString(w, `{"status":200,"data":{"series":[`+merged+`]}}`)
+		case "deleted-only":
+			io.WriteString(w, `{"status":200,"data":{"series":[`+deleted+`]}}`)
+		case "bad":
+			http.Error(w, "bad id", http.StatusBadRequest)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	mux.HandleFunc("GET /v1/source/manga-updates/{id}", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"status":200,"data":{"series":[`+chainsaw+`]}}`)
+	})
+	mux.HandleFunc("GET /v1/series/search", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"status":200,"data":[]}`)
+	})
+	c, _ := newTestClient(t, mux)
+
+	cases := []struct {
+		name   string
+		ids    core.IDs
+		wantID string
+		found  bool
+	}{
+		{"deleted then active picks active", core.IDs{core.IDAniList: "del-active"}, "2000", true},
+		{"merged follows merged_with", core.IDs{core.IDAniList: "merged"}, "1677", true},
+		{"deleted only falls through to next source", core.IDs{core.IDAniList: "deleted-only", core.IDMangaUpdates: "x"}, "1677", true},
+		{"deleted only, nothing else, not found", core.IDs{core.IDAniList: "deleted-only"}, "", false},
+		{"400 is treated like 404", core.IDs{core.IDAniList: "bad", core.IDMangaUpdates: "x"}, "1677", true},
+	}
+	for _, tc := range cases {
+		id, found, err := c.Resolve(t.Context(), core.Series{IDs: tc.ids})
+		if err != nil || id != tc.wantID || found != tc.found {
+			t.Errorf("%s: got %q, %v, %v; want %q, %v", tc.name, id, found, err, tc.wantID, tc.found)
+		}
+	}
+}
+
+func TestFollowMergedDeletedAndLoops(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/series/{id}", func(w http.ResponseWriter, r *http.Request) {
+		switch r.PathValue("id") {
+		case "11": // deleted
+			io.WriteString(w, `{"status":200,"data":{"id":11,"state":"deleted"}}`)
+		case "20": // merge cycle 20 -> 21 -> 20
+			io.WriteString(w, `{"status":200,"data":{"id":20,"state":"merged","merged_with":21}}`)
+		case "21":
+			io.WriteString(w, `{"status":200,"data":{"id":21,"state":"merged","merged_with":20}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	c, _ := newTestClient(t, mux)
+	for _, id := range []string{"11", "20"} {
+		got, found, err := c.Resolve(t.Context(), core.Series{IDs: core.IDs{core.IDMangaBaka: id}})
+		if err != nil || found || got != "" {
+			t.Errorf("Resolve(mangabaka=%s) = %q, %v, %v; want not found", id, got, found, err)
+		}
+	}
 }

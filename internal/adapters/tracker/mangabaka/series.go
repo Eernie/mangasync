@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"mangasync/internal/core"
 	"mangasync/internal/httpx"
@@ -25,6 +26,13 @@ type titleDTO struct {
 	Title string `json:"title"`
 }
 
+type v2TitleDTO struct {
+	Language  string   `json:"language"`
+	Traits    []string `json:"traits"`
+	Title     string   `json:"title"`
+	IsPrimary *bool    `json:"is_primary"`
+}
+
 type sourceDTO struct {
 	ID json.RawMessage `json:"id"`
 }
@@ -37,6 +45,7 @@ type seriesDTO struct {
 	NativeTitle     *string               `json:"native_title"`
 	RomanizedTitle  *string               `json:"romanized_title"`
 	SecondaryTitles map[string][]titleDTO `json:"secondary_titles"`
+	Titles          []v2TitleDTO          `json:"titles"`
 	Status          *string               `json:"status"`
 	Source          map[string]sourceDTO  `json:"source"`
 }
@@ -55,8 +64,11 @@ var sourceKinds = map[string]core.IDKind{
 func (d seriesDTO) toCore() core.Series {
 	id := strconv.Itoa(d.ID)
 	s := core.Series{Ref: id, Title: d.Title, IDs: core.IDs{core.IDMangaBaka: id}}
+	if s.Title == "" {
+		s.Title = d.primaryV2Title() // v2 series have no top-level title
+	}
 	add := func(t string) {
-		if t != "" && t != d.Title && !slices.Contains(s.AltTitles, t) {
+		if t != "" && t != s.Title && !slices.Contains(s.AltTitles, t) {
 			s.AltTitles = append(s.AltTitles, t)
 		}
 	}
@@ -81,6 +93,9 @@ func (d seriesDTO) toCore() core.Series {
 	if d.NativeTitle != nil {
 		add(*d.NativeTitle)
 	}
+	for _, t := range d.orderedV2Titles() {
+		add(t)
+	}
 	for key, src := range d.Source {
 		if kind, ok := sourceKinds[key]; ok {
 			if v := rawID(src.ID); v != "" {
@@ -89,6 +104,54 @@ func (d seriesDTO) toCore() core.Series {
 		}
 	}
 	return s
+}
+
+// primaryV2Title picks the main title of a v2 series: the is_primary one, else the first
+// English one, else the first.
+func (d seriesDTO) primaryV2Title() string {
+	for _, t := range d.Titles {
+		if t.IsPrimary != nil && *t.IsPrimary && t.Title != "" {
+			return t.Title
+		}
+	}
+	for _, t := range d.Titles {
+		if t.Language == "en" && t.Title != "" {
+			return t.Title
+		}
+	}
+	for _, t := range d.Titles {
+		if t.Title != "" {
+			return t.Title
+		}
+	}
+	return ""
+}
+
+// orderedV2Titles returns every v2 title: English first, then other Latin-script, then the rest.
+func (d seriesDTO) orderedV2Titles() []string {
+	var english, latin, other []string
+	for _, t := range d.Titles {
+		switch {
+		case t.Title == "":
+		case t.Language == "en":
+			english = append(english, t.Title)
+		case isLatin(t.Title):
+			latin = append(latin, t.Title)
+		default:
+			other = append(other, t.Title)
+		}
+	}
+	return slices.Concat(english, latin, other)
+}
+
+// isLatin reports whether every letter in s is Latin script.
+func isLatin(s string) bool {
+	for _, r := range s {
+		if unicode.IsLetter(r) && !unicode.Is(unicode.Latin, r) {
+			return false
+		}
+	}
+	return true
 }
 
 func rawID(r json.RawMessage) string {
@@ -141,17 +204,35 @@ func (c *Client) Resolve(ctx context.Context, s core.Series) (string, bool, erro
 			} `json:"data"`
 		}
 		err := c.api.DoJSON(ctx, http.MethodGet, c.url("/v1/source/"+sp.path+"/"+url.PathEscape(v)), c.header(), nil, &env)
-		if httpx.IsNotFound(err) {
+		if httpx.IsNotFound(err) || httpx.IsStatus(err, http.StatusBadRequest) {
 			continue
 		}
 		if err != nil {
 			return "", false, fmt.Errorf("source lookup %s/%s: %w", sp.path, v, err)
 		}
-		if len(env.Data.Series) > 0 {
-			return env.Data.Series[0].currentID(), true, nil
+		if id, found, err := c.pickSourceSeries(ctx, env.Data.Series); err != nil || found {
+			return id, found, err
 		}
 	}
 	return c.searchTitle(ctx, s)
+}
+
+// pickSourceSeries returns the first active series; failing that, the first merged one
+// followed to its target. Deleted series are skipped.
+func (c *Client) pickSourceSeries(ctx context.Context, list []seriesDTO) (string, bool, error) {
+	for _, d := range list {
+		if d.State == "active" {
+			return strconv.Itoa(d.ID), true, nil
+		}
+	}
+	for _, d := range list {
+		if d.State == "merged" && d.MergedWith != nil {
+			if id, found, err := c.followMerged(ctx, strconv.Itoa(*d.MergedWith)); err != nil || found {
+				return id, found, err
+			}
+		}
+	}
+	return "", false, nil
 }
 
 func (c *Client) followMerged(ctx context.Context, id string) (string, bool, error) {
@@ -163,13 +244,17 @@ func (c *Client) followMerged(ctx context.Context, id string) (string, bool, err
 		if err != nil {
 			return "", false, err
 		}
-		next := d.currentID()
-		if next == id {
+		switch {
+		case d.State == "deleted":
+			return "", false, nil
+		case d.State != "merged":
 			return id, true, nil
+		case d.MergedWith == nil:
+			return "", false, nil
 		}
-		id = next
+		id = strconv.Itoa(*d.MergedWith)
 	}
-	return id, true, nil
+	return "", false, nil // merge chain too long or cyclic
 }
 
 func (c *Client) searchTitle(ctx context.Context, s core.Series) (string, bool, error) {
