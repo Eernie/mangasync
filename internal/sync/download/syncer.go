@@ -165,15 +165,27 @@ func (s *Syncer) release(ctx context.Context, e core.LibraryEntry) error {
 	if rec != nil && rec.Status == store.Released {
 		return nil
 	}
-	have, err := s.Downloader.FindInLibrary(ctx, e.Series)
-	if err != nil {
-		return fmt.Errorf("find in downloader library: %w", err)
+	var prev *core.Candidate // marker of an earlier acquire, kept so the series stays managed by us
+	if rec != nil && rec.CandidateRef != "" {
+		prev = &core.Candidate{Ref: rec.CandidateRef, SourceName: rec.Source}
+	}
+	// What we acquired is what we release: title-matching the downloader library could miss it
+	// (or hit another manga) and leave the entry behind.
+	var have *core.Candidate
+	if prev != nil && (rec.Status == store.Acquired || rec.Status == store.InProgress) {
+		have = prev
+	} else {
+		found, err := s.Downloader.FindInLibrary(ctx, e.Series)
+		if err != nil {
+			return fmt.Errorf("find in downloader library: %w", err)
+		}
+		have = found
 	}
 	if have == nil {
 		log.Debug("not in downloader library; nothing to release")
-		return s.save(ctx, e, store.Released, nil, 0, time.Time{})
+		return s.save(ctx, e, store.Released, prev, 0, time.Time{})
 	}
-	log.Info("releasing", "candidate", have.Title, "candidate_ref", have.Ref)
+	log.Info("releasing", "candidate", have.Title, "candidate_ref", have.Ref, "source", have.SourceName)
 	if s.DryRun {
 		return nil
 	}

@@ -247,6 +247,64 @@ func TestDroppedThenReacquiredEvenThoughKeptFilesAreInReader(t *testing.T) {
 	}
 }
 
+func TestDroppedIsReleasedByRecordedCandidate(t *testing.T) {
+	fx := newFixture(t, entry("1", "Fire Force", core.StatusPlanning, nil))
+	fx.dl.Search["1"] = core.Candidate{Ref: "50", Title: "Fire Force", SourceName: "Src"}
+	fx.run(t) // acquired with ref 50; the fake library stays empty, so title matching would miss
+	if r := fx.record(t, "1"); r.Status != store.Acquired || r.CandidateRef != "50" {
+		t.Fatalf("record = %+v", r)
+	}
+
+	fx.tr.SetLibrary([]core.LibraryEntry{entry("1", "Fire Force", core.StatusDropped, nil)})
+	fx.run(t)
+	if got := fx.dl.ReleasedCandidates(); len(got) != 1 || got[0].Ref != "50" || got[0].SourceName != "Src" {
+		t.Fatalf("released = %+v", got)
+	}
+	if r := fx.record(t, "1"); r.Status != store.Released || r.CandidateRef != "50" || r.Source != "Src" {
+		t.Fatalf("record = %+v", r)
+	}
+
+	// Back to planning; the kept files are in the reader but the record shows they are ours.
+	fx.reader.Series["K1"] = core.Series{Ref: "K1", Title: "Fire Force"}
+	fx.tr.SetLibrary([]core.LibraryEntry{entry("1", "Fire Force", core.StatusPlanning, nil)})
+	fx.run(t)
+	if got := fx.dl.AcquiredCandidates(); len(got) != 2 || got[1].Ref != "50" {
+		t.Fatalf("acquired = %+v", got)
+	}
+	if r := fx.record(t, "1"); r.Status != store.Acquired {
+		t.Fatalf("record = %+v", r)
+	}
+}
+
+func TestDroppedMissKeepsPreviousCandidateMarker(t *testing.T) {
+	fx := newFixture(t, entry("1", "Fire Force", core.StatusDropped, nil))
+	if err := fx.st.PutDownload(t.Context(), store.DownloadRecord{
+		Tracker: "mangabaka", TrackerID: "1", Downloader: "suwayomi", Status: store.NotFound,
+		CandidateRef: "50", Source: "Src", UpdatedAt: fx.now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fx.run(t) // no recorded acquire to release, FindInLibrary misses
+	if len(fx.dl.ReleasedCandidates()) != 0 {
+		t.Fatalf("released = %+v", fx.dl.ReleasedCandidates())
+	}
+	if r := fx.record(t, "1"); r.Status != store.Released || r.CandidateRef != "50" || r.Source != "Src" {
+		t.Fatalf("record = %+v", r)
+	}
+}
+
+func TestDroppedDryRunWithRecordedCandidateChangesNothing(t *testing.T) {
+	fx := newFixture(t, entry("1", "Fire Force", core.StatusPlanning, nil))
+	fx.dl.Search["1"] = core.Candidate{Ref: "50", Title: "Fire Force"}
+	fx.run(t)
+	fx.s.DryRun = true
+	fx.tr.SetLibrary([]core.LibraryEntry{entry("1", "Fire Force", core.StatusDropped, nil)})
+	fx.run(t)
+	if len(fx.dl.ReleasedCandidates()) != 0 || fx.record(t, "1").Status != store.Acquired {
+		t.Fatal("dry-run must not release or write")
+	}
+}
+
 func TestInProgressWithCandidateIgnoresReaderCheck(t *testing.T) {
 	fx := newFixture(t, entry("1", "Frieren", core.StatusPlanning, nil))
 	fx.dl.Search["1"] = core.Candidate{Ref: "130", Title: "Frieren"}
