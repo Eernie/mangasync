@@ -72,6 +72,18 @@ func (s *Syncer) syncTracker(ctx context.Context, series core.Series, prog core.
 	if target == nil {
 		return nil
 	}
+	if target.Status == core.StatusPlanning {
+		// Plan-to-read is added only the first time: once we pushed anything for this series,
+		// an entry the user removed from the tracker is not re-created.
+		m, err := s.Store.GetMapping(ctx, s.Reader.Name(), series.Ref, tr.Name())
+		if err != nil {
+			return fmt.Errorf("get mapping: %w", err)
+		}
+		if m != nil && m.LastStatus != "" {
+			s.Log.Debug("planning already pushed once; not re-creating", "series", series.Title, "tracker", tr.Name())
+			return nil
+		}
+	}
 	cur, err := tr.GetEntry(ctx, id)
 	if err != nil {
 		return fmt.Errorf("get entry: %w", err)

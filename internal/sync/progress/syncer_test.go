@@ -295,3 +295,35 @@ func TestEmptySeriesIsSkippedBeforeResolving(t *testing.T) {
 		t.Fatalf("mapping written for an empty series: %+v", m)
 	}
 }
+
+// A planning entry is created once. If the user deletes it on the tracker it is not re-created,
+// but reading the series later still creates a reading entry.
+func TestPlanningIsOnlyCreatedOnce(t *testing.T) {
+	tr := &coretest.FakeTracker{TrackerName: "mangabaka", IDsByRef: map[string]string{"S1": "1"}}
+	rd := reader(core.ReadProgress{Unit: core.UnitChapter, BooksTotal: 10})
+	s := &Syncer{Reader: rd, Trackers: []core.Tracker{tr}, Store: newStore(t), Log: quietLog()}
+	sync := func() {
+		t.Helper()
+		if err := s.SyncSeries(t.Context(), "S1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sync()
+	if saved := tr.SavedEntries(); len(saved) != 1 || *saved[0].Update.Status != core.StatusPlanning {
+		t.Fatalf("first sync saved %+v, want one planning entry", saved)
+	}
+
+	delete(tr.Entries, "1") // the user removes it from their MangaBaka list
+	sync()
+	if saved := tr.SavedEntries(); len(saved) != 1 {
+		t.Fatalf("deleted planning entry was re-created: %+v", saved)
+	}
+
+	rd.Progress["S1"] = core.ReadProgress{Unit: core.UnitChapter, BooksTotal: 10, BooksRead: 2, LastReadNumber: 2}
+	sync()
+	saved := tr.SavedEntries()
+	if len(saved) != 2 || *saved[1].Update.Status != core.StatusReading || *saved[1].Update.Chapter != 2 {
+		t.Fatalf("after reading started saved %+v, want a reading entry at chapter 2", saved)
+	}
+}

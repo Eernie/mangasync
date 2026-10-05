@@ -158,7 +158,7 @@ Reader → tracker:
 
 | Reader state | Tracker status | Progress |
 |---|---|---|
-| nothing read or opened (`BooksRead == 0`, `BooksInProgress == 0`) | `planning` (`plan_to_read`), **only if the series is not in the tracker list yet**; an existing entry of any status is left untouched | none, no dates |
+| nothing read or opened (`BooksRead == 0`, `BooksInProgress == 0`) | `planning` (`plan_to_read`), **only if the series is not in the tracker list yet, and only the first time** (a planning entry the user deleted is not re-created); an existing entry of any status is left untouched | none, no dates |
 | first book(s) only partly read (`BooksRead == 0`, `BooksInProgress > 0`) | `reading` | none |
 | some books read | `reading` | `LastReadNumber` |
 | all read, still publishing | `reading` | `MaxNumber` |
@@ -199,7 +199,7 @@ For one reader series, for each tracker in `TRACKERS` (failures in one tracker d
    - `BooksRead == 0`, `BooksInProgress == 0` (and `BooksTotal > 0`) → `planning`, no progress, no dates. A series without any books gives no target.
    - Progress goes in `Chapter` or `Volume` per `ReadProgress.Unit`.
 3. **Decide** against the current entry (`GetEntry`):
-   - A `planning` target only creates a missing entry: with no current entry the update is `status = planning` and nothing else; with any current entry (whatever its status, progress or dates) the result is nil. It never modifies an existing MangaBaka entry. This is an early branch, so the rules below only apply to `reading`/`completed` targets.
+   - A `planning` target only creates a missing entry: with no current entry the update is `status = planning` and nothing else; with any current entry (whatever its status, progress or dates) the result is nil. It never modifies an existing MangaBaka entry. On top of that, the syncer creates planning only the first time: if the series mapping already has a `LastStatus` (we pushed something before, recorded after every save), a planning target is skipped before `GetEntry`, so an entry the user deleted on the tracker is not re-created. Reading later still creates a `reading` entry. `Decide` is an early branch, so the rules below only apply to `reading`/`completed` targets.
    - Protected: if current status is `paused`, `dropped`, `completed`, `rereading` or `unknown` → do nothing.
    - Status may move: none/`considering`/`planning` → `reading`/`completed`; `reading` → `completed`. Never backwards.
    - Never lower progress: only send progress if target > current (or current is nil).
