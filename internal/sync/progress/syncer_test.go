@@ -248,3 +248,36 @@ func TestSyncFillsMissingStartDateOnUpToDateEntry(t *testing.T) {
 		t.Fatalf("saved = %+v", saved)
 	}
 }
+
+func TestUnstartedSeriesIsPlannedOnlyWhenNotInTrackerList(t *testing.T) {
+	unstarted := core.ReadProgress{Unit: core.UnitChapter, BooksTotal: 10}
+
+	// Not in the tracker list: created as planning, without progress or dates.
+	tr := &coretest.FakeTracker{TrackerName: "mangabaka", IDsByRef: map[string]string{"S1": "1"}}
+	s := &Syncer{Reader: reader(unstarted), Trackers: []core.Tracker{tr}, Store: newStore(t), Log: quietLog()}
+	if err := s.SyncSeries(t.Context(), "S1"); err != nil {
+		t.Fatal(err)
+	}
+	saved := tr.SavedEntries()
+	if len(saved) != 1 || *saved[0].Update.Status != core.StatusPlanning ||
+		saved[0].Update.Chapter != nil || saved[0].Update.Volume != nil ||
+		saved[0].Update.StartDate != nil || saved[0].Update.FinishDate != nil {
+		t.Fatalf("saved = %+v", saved)
+	}
+
+	// Already in the list under any status: nothing is saved.
+	for _, st := range []core.Status{
+		core.StatusConsidering, core.StatusPlanning, core.StatusReading, core.StatusPaused,
+		core.StatusDropped, core.StatusCompleted, core.StatusRereading, core.StatusUnknown,
+	} {
+		tr := &coretest.FakeTracker{TrackerName: "mangabaka", IDsByRef: map[string]string{"S1": "1"},
+			Entries: map[string]*core.Entry{"1": {Status: st}}}
+		s := &Syncer{Reader: reader(unstarted), Trackers: []core.Tracker{tr}, Store: newStore(t), Log: quietLog()}
+		if err := s.SyncSeries(t.Context(), "S1"); err != nil {
+			t.Fatal(err)
+		}
+		if got := tr.SavedEntries(); len(got) != 0 {
+			t.Errorf("existing %q entry was modified: %+v", st, got)
+		}
+	}
+}

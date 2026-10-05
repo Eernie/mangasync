@@ -25,8 +25,12 @@ const dateLayout = "2006-01-02"
 // ComputeTarget maps reader progress to a target status/progress/dates. ended is the tracker's
 // publication status and only matters when every book is read. Dates are calendar dates in loc
 // (nil = time.Local); the finish date is only set for a completed target.
-// Returns nil if nothing was read.
+// Nothing read and nothing in progress gives a planning target without progress or dates;
+// a series without any books gives nil.
 func ComputeTarget(p core.ReadProgress, ended bool, loc *time.Location) *Target {
+	if p.BooksTotal == 0 {
+		return nil
+	}
 	t := &Target{Unit: p.Unit}
 	switch {
 	case p.AllRead():
@@ -41,7 +45,7 @@ func ComputeTarget(p core.ReadProgress, ended bool, loc *time.Location) *Target 
 	case p.BooksInProgress > 0:
 		t.Status = core.StatusReading
 	default:
-		return nil
+		return &Target{Status: core.StatusPlanning, Unit: p.Unit}
 	}
 	if loc == nil {
 		loc = time.Local
@@ -72,7 +76,15 @@ func positive(v float64) *float64 {
 // Decide returns the update that moves cur towards t, or nil if nothing should change.
 // Protected statuses are never touched, status never moves backwards and progress never goes down.
 // Dates are only filled in when the entry has none yet; an existing date is never overwritten.
+// A planning target only creates a missing entry: any existing entry, whatever its status, is left alone.
 func Decide(cur *core.Entry, t Target) *core.EntryUpdate {
+	if t.Status == core.StatusPlanning {
+		if cur != nil {
+			return nil
+		}
+		s := core.StatusPlanning
+		return &core.EntryUpdate{Status: &s}
+	}
 	if cur != nil {
 		switch cur.Status {
 		case core.StatusConsidering, core.StatusPlanning, core.StatusReading:

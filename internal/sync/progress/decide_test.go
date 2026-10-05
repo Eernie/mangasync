@@ -17,7 +17,11 @@ func TestComputeTarget(t *testing.T) {
 		ended bool
 		want  *Target
 	}{
-		{"nothing read", core.ReadProgress{Unit: ch, BooksTotal: 10}, false, nil},
+		{"nothing read", core.ReadProgress{Unit: ch, BooksTotal: 10}, false,
+			&Target{Status: core.StatusPlanning, Unit: ch}},
+		{"nothing read, volume unit", core.ReadProgress{Unit: core.UnitVolume, BooksTotal: 3}, true,
+			&Target{Status: core.StatusPlanning, Unit: core.UnitVolume}},
+		{"empty series", core.ReadProgress{Unit: ch}, false, nil},
 		{"first book partly read", core.ReadProgress{Unit: ch, BooksTotal: 10, BooksInProgress: 1}, false,
 			&Target{Status: core.StatusReading, Unit: ch}},
 		{"some read", core.ReadProgress{Unit: ch, BooksTotal: 244, BooksRead: 104, LastReadNumber: 104, MaxNumber: 232}, false,
@@ -156,9 +160,10 @@ func TestComputeTargetDates(t *testing.T) {
 			t.Errorf("%s: dates = %q/%q, want %q/%q", c.name, got.StartDate, got.FinishDate, c.wantStart, c.wantFinish)
 		}
 	}
-	// Nothing read: still nil even if dates are present.
-	if got := ComputeTarget(core.ReadProgress{Unit: ch, BooksTotal: 5, FirstReadAt: first}, false, time.UTC); got != nil {
-		t.Errorf("nothing read: want nil, got %+v", *got)
+	// Nothing read: a planning target without dates, even if dates are present.
+	got := ComputeTarget(core.ReadProgress{Unit: ch, BooksTotal: 5, FirstReadAt: first, LastReadAt: last}, true, time.UTC)
+	if got == nil || got.Status != core.StatusPlanning || got.Progress != nil || got.StartDate != "" || got.FinishDate != "" {
+		t.Errorf("nothing read: want dateless planning target, got %s", fmtTarget(got))
 	}
 }
 
@@ -246,4 +251,32 @@ func strPtrVal(p *string) string {
 		return ""
 	}
 	return *p
+}
+
+func TestDecidePlanning(t *testing.T) {
+	planning := Target{Status: core.StatusPlanning, Unit: core.UnitChapter}
+
+	got := Decide(nil, planning)
+	if got == nil || got.Status == nil || *got.Status != core.StatusPlanning {
+		t.Fatalf("no tracker entry: want status planning, got %+v", got)
+	}
+	if got.Chapter != nil || got.Volume != nil || got.StartDate != nil || got.FinishDate != nil {
+		t.Errorf("no tracker entry: update must carry only the status, got %s", describe(*got))
+	}
+
+	// An existing entry of any status, with or without progress or dates, is never modified.
+	statuses := []core.Status{
+		core.StatusConsidering, core.StatusPlanning, core.StatusReading, core.StatusPaused,
+		core.StatusDropped, core.StatusCompleted, core.StatusRereading, core.StatusUnknown,
+	}
+	for _, s := range statuses {
+		for _, cur := range []*core.Entry{
+			{Status: s},
+			{Status: s, Chapter: f(12), Volume: f(2), StartDate: "2026-01-01", FinishDate: "2026-02-02"},
+		} {
+			if got := Decide(cur, planning); got != nil {
+				t.Errorf("existing %q entry: want nil, got %s", s, describe(*got))
+			}
+		}
+	}
 }
