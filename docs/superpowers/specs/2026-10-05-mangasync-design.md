@@ -221,7 +221,7 @@ Any other status → nothing. A record flips between `acquired` and `released` a
 ## Matching (`internal/match`, shared by adapters)
 
 - `Normalize`: lowercase, Unicode NFKC, map `_`, `-`, `–`, `—`, `:` to spaces, drop apostrophes (`'`, `’`), strip remaining punctuation/brackets, collapse whitespace, drop leading "the"/"a". Komga folder names replace `:` with `_` (e.g. `Naruto_ Sasuke's Story - The Uchiha and the Heavenly Stardust_ The Manga` must match MangaBaka's `Naruto: Sasuke’s Story—The Uchiha and the Heavenly Stardust: The Manga`).
-- `Similarity`: 1 − Levenshtein/maxLen on normalized strings; exact match = 1.0.
+- `Similarity`: 1 − Levenshtein/maxLen on normalized strings; exact match = 1.0; equal after removing spaces = 1.0 (`LOSTEND` ↔ `Lost End`).
 - `Best(titles []string, candidates) (best, nearMisses)`: max similarity of each candidate against all titles; accept if ≥ `MATCH_THRESHOLD` (default 0.9).
 - `ParseLink(url) (IDKind, id, ok)`: recognizes URLs for mangabaka.org, anilist.co, myanimelist.net, mangaupdates.com (base36 ID, e.g. `/series/ylx5wzn/…`), kitsu.app/kitsu.io, anime-planet.com (slug), animenewsnetwork.com, mangadex.org (UUID; `IDKind` `mangadex`, not used by MangaBaka but kept for future adapters). Unrecognized links (Amazon, BookWalker, official sites) are ignored.
 
@@ -294,9 +294,9 @@ Env: `SUWAYOMI_URL`, `SUWAYOMI_AUTH` (`none` | `basic` | `ui_login`), `SUWAYOMI_
 
 - GraphQL at `/api/graphql`, typed structs over `net/http`. `ui_login`: `login` mutation → Bearer access token (~5 min), refreshed via `refreshToken` mutation.
 - Startup: resolve `SUWAYOMI_SOURCES` names → IDs via `sources` query; fail on unknown names.
-- `Find`: for each source in order, `fetchSourceManga(type: SEARCH, query: title, page: 1)`; score with `match.Best` against title + all alt titles; first source with an accepted candidate wins. If nothing matches on the main title, repeat once with the first English alt title. Alt titles are essential: sources use English titles (Weeb Central returns `Frieren - Beyond Journey's End`) while MangaBaka's main title may be romaji.
+- `Find`: for each source in order, `fetchSourceManga(type: SEARCH, query: title, page: 1)`; score with `match.Best` against title + all alt titles; first source with an accepted candidate wins. Queries: the main title first (all sources), then up to two Latin-script alt titles. Alt titles are essential: sources use English titles (Weeb Central returns `Frieren - Beyond Journey's End`) while MangaBaka's main title may be romaji.
 - `FindInLibrary`: `mangas(condition:{inLibrary:true})` (cached per poll) scored with `match.Best` against title + alt titles.
-- `Acquire`: `updateManga(patch:{inLibrary:true})` if not in library → `fetchChapters` → `enqueueChapterDownloads` for chapters with `isDownloaded == false`.
+- `Acquire`: `updateManga(patch:{inLibrary:true})` → `fetchMangaAndChapters(input:{id, fetchManga:true, fetchChapters:true})` (there is no `fetchChapters` mutation in v2.4.2378) → `enqueueChapterDownloads` for chapters with `isDownloaded == false`.
 - `Release`: `updateManga(patch:{inLibrary:false})`. Chapters and files on disk are untouched.
 - Live instance: v2.4.2378 (Preview), auth `none`, installed sources `Weeb Central (EN)`, `ManhuaTop (EN)`, `Webdex Scans (EN)`. The existing 28-series library all comes from Weeb Central.
 
