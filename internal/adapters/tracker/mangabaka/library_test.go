@@ -25,19 +25,21 @@ const borutoV2 = `{"id":2000,"state":"active","status":"completed",
 func TestListLibraryPagesAndMaps(t *testing.T) {
 	c, rec := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
-		if r.URL.Path != "/v2/my/library" || !slices.Equal(q["state"], []string{"plan_to_read", "dropped"}) ||
+		if r.URL.Path != "/v2/my/library" || len(q["state"]) != 1 ||
 			q.Get("limit") != "100" || q.Get("schema") != "full" {
 			t.Errorf("unexpected request %s", r.URL)
 		}
-		switch q.Get("page") {
-		case "1":
-			io.WriteString(w, `{"status":200,"pagination":{"next":"page2"},"data":[
-				{"entry":{"series_id":1677,"state":"plan_to_read"},"lists":[],"series":`+chainsawV2+`}]}`)
-		case "2":
+		switch q.Get("state") + "/" + q.Get("page") {
+		case "plan_to_read/1":
 			io.WriteString(w, `{"status":200,"pagination":{"next":null},"data":[
+				{"entry":{"series_id":1677,"state":"plan_to_read"},"lists":[],"series":`+chainsawV2+`}]}`)
+		case "dropped/1":
+			io.WriteString(w, `{"status":200,"pagination":{"next":"page2"},"data":[
 				{"entry":{"series_id":2000,"state":"dropped"},"lists":[],"series":`+borutoV2+`}]}`)
+		case "dropped/2":
+			io.WriteString(w, `{"status":200,"pagination":{"next":null},"data":[]}`)
 		default:
-			t.Errorf("unexpected page %q", q.Get("page"))
+			t.Errorf("unexpected state/page %q", q.Get("state")+"/"+q.Get("page"))
 		}
 	}))
 
@@ -45,8 +47,19 @@ func TestListLibraryPagesAndMaps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || len(rec.all()) != 2 {
+	if len(got) != 2 || len(rec.all()) != 3 {
 		t.Fatalf("entries = %+v, requests = %d", got, len(rec.all()))
+	}
+	var states []string
+	for _, r := range rec.all() {
+		for _, p := range strings.FieldsFunc(r, func(c rune) bool { return c == '?' || c == '&' || c == ' ' }) {
+			if v, ok := strings.CutPrefix(p, "state="); ok {
+				states = append(states, v)
+			}
+		}
+	}
+	if !slices.Equal(states, []string{"plan_to_read", "dropped", "dropped"}) {
+		t.Errorf("states requested = %v", states)
 	}
 	first := got[0]
 	if first.Status != core.StatusPlanning || first.Series.Ref != "1677" || first.Series.Title != "Chainsaw Man" ||
@@ -57,6 +70,18 @@ func TestListLibraryPagesAndMaps(t *testing.T) {
 	}
 	if got[1].Status != core.StatusDropped || got[1].Series.Ref != "2000" || got[1].Series.Title != "Boruto: Naruto Next Generations" {
 		t.Errorf("second = %+v", got[1])
+	}
+}
+
+func TestListLibraryDedupesOverlap(t *testing.T) {
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// a server that ignores the state filter and returns the same series for every request
+		io.WriteString(w, `{"status":200,"pagination":{"next":null},"data":[
+			{"entry":{"series_id":2000,"state":"dropped"},"lists":[],"series":`+borutoV2+`}]}`)
+	}))
+	got, err := c.ListLibrary(t.Context(), []core.Status{core.StatusPlanning, core.StatusDropped})
+	if err != nil || len(got) != 1 || got[0].Series.Ref != "2000" {
+		t.Fatalf("got %+v, err %v", got, err)
 	}
 }
 
