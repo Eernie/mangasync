@@ -208,7 +208,3 @@ func (c *Client) SeriesEnded(ctx context.Context, id string) (bool, error) {
 	c.mu.Unlock()
 	return ended, nil
 }
-
-func (c *Client) ListLibrary(ctx context.Context, statuses []core.Status) ([]core.LibraryEntry, error) {
-	panic("implemented in Task 16")
-}
