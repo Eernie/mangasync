@@ -2,7 +2,10 @@
 // It must not import any other package from this module.
 package core
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // IDKind names an external database a series can be identified by.
 type IDKind string
@@ -57,9 +60,11 @@ type ReadProgress struct {
 	Unit            Unit
 	BooksTotal      int
 	BooksRead       int
-	BooksInProgress int     // partially read books
-	LastReadNumber  float64 // last continuously-read chapter/volume number
-	MaxNumber       float64 // highest chapter/volume number present
+	BooksInProgress int       // partially read books
+	LastReadNumber  float64   // last continuously-read chapter/volume number
+	MaxNumber       float64   // highest chapter/volume number present
+	FirstReadAt     time.Time // earliest read date of any read or in-progress book; zero = unknown
+	LastReadAt      time.Time // latest read date of any read or in-progress book; zero = unknown
 }
 
 // AllRead reports whether every book in the series has been read.
@@ -67,16 +72,20 @@ func (p ReadProgress) AllRead() bool { return p.BooksTotal > 0 && p.BooksRead >=
 
 // Entry is a series' entry in the user's tracker list.
 type Entry struct {
-	Status  Status
-	Chapter *float64
-	Volume  *float64
+	Status     Status
+	Chapter    *float64
+	Volume     *float64
+	StartDate  string // YYYY-MM-DD, "" = not set
+	FinishDate string // YYYY-MM-DD, "" = not set
 }
 
 // EntryUpdate is a partial update; nil fields are left unchanged.
 type EntryUpdate struct {
-	Status  *Status
-	Chapter *float64
-	Volume  *float64
+	Status     *Status
+	Chapter    *float64
+	Volume     *float64
+	StartDate  *string // YYYY-MM-DD
+	FinishDate *string // YYYY-MM-DD
 }
 
 // LibraryEntry is one series in the user's tracker list.
