@@ -14,7 +14,7 @@ data:
   KOMGA_URL: https://komga.example.com
   SUWAYOMI_URL: https://suwayomi.example.com
   SUWAYOMI_AUTH: none
-  SUWAYOMI_SOURCES: Weeb Central (EN),ManhuaTop (EN),Webdex Scans (EN)
+  SUWAYOMI_SOURCES: Weeb Central (EN),MangaDex (EN),MangaFire (EN),Lunar Manga (EN),Webdex Scans (EN),ManhuaTop (EN)
   DOWNLOAD_INTERVAL: 15m
   RECONCILE_INTERVAL: 1h
   LOG_LEVEL: info
