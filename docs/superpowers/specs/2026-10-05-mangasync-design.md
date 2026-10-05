@@ -166,11 +166,12 @@ Reader → tracker:
 
 Typical flow: mark WTR → acquired and downloaded → appears in Komga → reading sets `reading` (downloader: already had, no-op) → finishing sets `completed` (or stays `reading` while ongoing). Manually setting `dropped` releases it; setting it back to WTR/reading acquires it again.
 
-"Already had" means either of:
+"Already had" means any of:
 - found in the downloader's library (`FindInLibrary`), or
-- present in the reader: a reader series (`ListAllSeries`, fetched once per poll) shares any cross-reference ID with the tracker series, or matches its titles at ≥ `MATCH_THRESHOLD`. This prevents duplicate downloads of series added to Komga outside Suwayomi.
-  - or the tracker series is the one progress sync matched to a reader series (`series_map` row with status `matched`, loaded once per poll via `MatchedTrackerIDs`) that is still in the reader. This covers matches made by title search where the shared IDs conflict, and merged tracker IDs. A mapping to a reader series that no longer exists is ignored.
-  - Both reader checks are skipped when our own download record shows we managed the series (kept files of a released series must not block re-acquiring).
+- present in the reader: a reader series (`ListAllSeries`, fetched once per poll) shares any cross-reference ID with the tracker series, or matches its titles at ≥ `MATCH_THRESHOLD`. This prevents duplicate downloads of series added to Komga outside Suwayomi, or
+- mapped: progress sync matched a reader series to this tracker series (`series_map` rows with status `matched`, loaded once per poll via `MatchedTrackerIDs`, which returns every reader ref per tracker ID) and at least one of those reader series is still in the reader. This covers matches made by title search where the shared IDs conflict, and merged tracker IDs. Mappings to reader series that no longer exist (e.g. before a re-import) are ignored.
+
+Both reader checks (present in the reader, mapped) are skipped when our own download record shows we managed the series: kept files of a released series must not block re-acquiring.
 
 The acquire/release status sets are configurable (`ACQUIRE_STATUSES`, `RELEASE_STATUSES`).
 

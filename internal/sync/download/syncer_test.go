@@ -527,3 +527,19 @@ func TestMappedReaderSeriesDoesNotBlockReacquireWhenManagedByUs(t *testing.T) {
 		t.Fatalf("re-acquired = %+v", got)
 	}
 }
+
+// After a Komga re-import the stale mapping (K1) and the current one (K2) both point at tracker 5.
+// Only K2 is in the reader, and its IDs conflict with the tracker entry: still already in reader.
+func TestMappedAfterReimportWithStaleMappingIsAlreadyInReader(t *testing.T) {
+	fx := newFixture(t, entry("5", "Naruto", core.StatusPlanning, core.IDs{core.IDAniList: "30011"}))
+	fx.reader.Series["K2"] = core.Series{Ref: "K2", Title: "Naruto", IDs: core.IDs{core.IDAniList: "999"}}
+	fx.dl.Search["5"] = core.Candidate{Ref: "7", Title: "Naruto"}
+	putMapping(t, fx, "K1", "5") // gone from the reader
+	putMapping(t, fx, "K2", "5")
+
+	fx.run(t)
+
+	if fx.dl.FindCallCount() != 0 || len(fx.dl.AcquiredCandidates()) != 0 {
+		t.Fatalf("find=%d acquired=%v; want none", fx.dl.FindCallCount(), fx.dl.AcquiredCandidates())
+	}
+}

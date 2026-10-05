@@ -139,24 +139,24 @@ func (s *Store) PutMapping(ctx context.Context, m SeriesMapping) error {
 	return nil
 }
 
-// MatchedTrackerIDs returns tracker_id -> reader_ref for every matched mapping between reader and
-// tracker. If several reader series map to one tracker ID, the lowest reader_ref wins.
-func (s *Store) MatchedTrackerIDs(ctx context.Context, reader, tracker string) (map[string]string, error) {
+// MatchedTrackerIDs returns tracker_id -> every reader_ref with a matched mapping to it, between
+// reader and tracker. Several reader series can map to one tracker ID (e.g. after a re-import).
+func (s *Store) MatchedTrackerIDs(ctx context.Context, reader, tracker string) (map[string][]string, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT tracker_id, reader_ref FROM series_map
-		 WHERE reader = ? AND tracker = ? AND status = ? AND tracker_id <> ''
-		 ORDER BY reader_ref DESC`, reader, tracker, string(Matched))
+		 WHERE reader = ? AND tracker = ? AND status = ? AND tracker_id <> ''`,
+		reader, tracker, string(Matched))
 	if err != nil {
 		return nil, fmt.Errorf("matched tracker ids: %w", err)
 	}
 	defer rows.Close()
-	out := map[string]string{}
+	out := map[string][]string{}
 	for rows.Next() {
 		var id, ref string
 		if err := rows.Scan(&id, &ref); err != nil {
 			return nil, fmt.Errorf("matched tracker ids: %w", err)
 		}
-		out[id] = ref // descending order: the last write is the lowest reader_ref
+		out[id] = append(out[id], ref)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("matched tracker ids: %w", err)

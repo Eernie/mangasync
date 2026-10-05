@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -102,8 +103,20 @@ func TestMatchedTrackerIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got["5"] != "K1" {
-		t.Fatalf("got %v, want only tracker 5 -> K1", got)
+	if len(got) != 1 || !slices.Equal(got["5"], []string{"K1"}) {
+		t.Fatalf("got %v, want only tracker 5 -> [K1]", got)
+	}
+
+	// Several reader series (e.g. after a re-import) can map to one tracker ID: all are returned.
+	put("komga", "K9", "mangabaka", "5", Matched)
+	got, err = s.MatchedTrackerIDs(ctx, "komga", "mangabaka")
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := slices.Clone(got["5"])
+	slices.Sort(refs)
+	if len(got) != 1 || !slices.Equal(refs, []string{"K1", "K9"}) {
+		t.Fatalf("got %v, want tracker 5 -> [K1 K9]", got)
 	}
 
 	empty, err := s.MatchedTrackerIDs(ctx, "komga", "nobody")

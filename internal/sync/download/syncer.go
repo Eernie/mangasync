@@ -83,7 +83,8 @@ func (s *Syncer) Run(ctx context.Context) error {
 }
 
 // mappedInReader returns the tracker IDs that progress sync matched to a series still in the
-// reader. A mapping to a series deleted from the reader is ignored.
+// reader. A tracker ID counts if any of its mapped reader refs is current; mappings to series
+// deleted from the reader (e.g. before a re-import) are ignored.
 func (s *Syncer) mappedInReader(ctx context.Context, readerSeries []core.Series) (map[string]bool, error) {
 	ids, err := s.Store.MatchedTrackerIDs(ctx, s.Reader.Name(), s.Tracker.Name())
 	if err != nil {
@@ -94,8 +95,8 @@ func (s *Syncer) mappedInReader(ctx context.Context, readerSeries []core.Series)
 		inReader[rs.Ref] = true
 	}
 	out := make(map[string]bool, len(ids))
-	for trackerID, readerRef := range ids {
-		if inReader[readerRef] {
+	for trackerID, readerRefs := range ids {
+		if slices.ContainsFunc(readerRefs, func(ref string) bool { return inReader[ref] }) {
 			out[trackerID] = true
 		}
 	}
