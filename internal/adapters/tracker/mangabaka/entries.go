@@ -15,6 +15,16 @@ type entryDTO struct {
 	State           string   `json:"state"`
 	ProgressChapter *float64 `json:"progress_chapter"`
 	ProgressVolume  *float64 `json:"progress_volume"`
+	StartDate       *string  `json:"start_date"`
+	FinishDate      *string  `json:"finish_date"`
+}
+
+// civilDate returns the YYYY-MM-DD part of a date or timestamp string, or "" if it is unset or too short.
+func civilDate(v *string) string {
+	if v == nil || len(*v) < 10 {
+		return ""
+	}
+	return (*v)[:10]
 }
 
 func (c *Client) GetEntry(ctx context.Context, id string) (*core.Entry, error) {
@@ -28,7 +38,10 @@ func (c *Client) GetEntry(ctx context.Context, id string) (*core.Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &core.Entry{Status: statusFromState(env.Data.State), Chapter: env.Data.ProgressChapter, Volume: env.Data.ProgressVolume}, nil
+	return &core.Entry{
+		Status: statusFromState(env.Data.State), Chapter: env.Data.ProgressChapter, Volume: env.Data.ProgressVolume,
+		StartDate: civilDate(env.Data.StartDate), FinishDate: civilDate(env.Data.FinishDate),
+	}, nil
 }
 
 // SaveEntry PATCHes the entry, creating it with POST if it is not in the library yet.
@@ -46,6 +59,12 @@ func (c *Client) SaveEntry(ctx context.Context, id string, u core.EntryUpdate) e
 	}
 	if u.Volume != nil {
 		body["progress_volume"] = *u.Volume
+	}
+	if u.StartDate != nil {
+		body["start_date"] = *u.StartDate
+	}
+	if u.FinishDate != nil {
+		body["finish_date"] = *u.FinishDate
 	}
 	if len(body) == 0 {
 		return nil

@@ -122,3 +122,46 @@ func TestSaveEntryCreatesWhenMissing(t *testing.T) {
 		t.Fatalf("POST body = %v", body)
 	}
 }
+
+func TestGetEntryParsesDates(t *testing.T) {
+	cases := map[string]struct{ body, wantStart, wantFinish string }{
+		"date only": {`{"state":"reading","start_date":"2026-06-06","finish_date":"2026-09-01"}`, "2026-06-06", "2026-09-01"},
+		"timestamp": {`{"state":"reading","start_date":"2026-06-06T00:00:00.000Z","finish_date":"2026-09-01T00:00:00.000Z"}`, "2026-06-06", "2026-09-01"},
+		"null":      {`{"state":"reading","start_date":null,"finish_date":null}`, "", ""},
+		"absent":    {`{"state":"reading"}`, "", ""},
+		"too short": {`{"state":"reading","start_date":"2026-06","finish_date":""}`, "", ""},
+	}
+	for name, tc := range cases {
+		c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, `{"status":200,"data":`+tc.body+`}`)
+		}))
+		e, err := c.GetEntry(t.Context(), "1677")
+		if err != nil || e == nil {
+			t.Fatalf("%s: entry = %+v, err = %v", name, e, err)
+		}
+		if e.StartDate != tc.wantStart || e.FinishDate != tc.wantFinish {
+			t.Errorf("%s: dates = %q/%q, want %q/%q", name, e.StartDate, e.FinishDate, tc.wantStart, tc.wantFinish)
+		}
+	}
+}
+
+func TestSaveEntrySendsDates(t *testing.T) {
+	c, rec := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"status":200,"data":{}}`)
+	}))
+	start, finish := "2026-06-06", "2026-09-01"
+	if err := c.SaveEntry(t.Context(), "1677", core.EntryUpdate{StartDate: &start}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SaveEntry(t.Context(), "1677", core.EntryUpdate{StartDate: &start, FinishDate: &finish}); err != nil {
+		t.Fatal(err)
+	}
+	got := rec.all()
+	want := []string{
+		`PATCH /v1/my/library/1677 {"start_date":"2026-06-06"}`,
+		`PATCH /v1/my/library/1677 {"finish_date":"2026-09-01","start_date":"2026-06-06"}`,
+	}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("requests = %q, want %q", got, want)
+	}
+}
