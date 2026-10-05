@@ -277,3 +277,46 @@ func TestResolveSearchSkipsDeletedAndFollowsMerged(t *testing.T) {
 		}
 	}
 }
+
+// Real MangaBaka data: one primary title per language, the first one not English, `title` null.
+func TestSeriesToCoreV2PrefersEnglishPrimary(t *testing.T) {
+	const soulEater = `{"id":77,"state":"active","title":null,"titles":[
+{"language":"ko","traits":[],"title":"소울이터","is_primary":true},
+{"language":"pt-br","traits":[],"title":"Devorador de almas","is_primary":true},
+{"language":"ko","traits":[],"title":"소울이터(SOUL EATER)","is_primary":false},
+{"language":"en","traits":["official"],"title":"SOUL EATER","is_primary":true},
+{"language":"ja","traits":["native"],"title":"SOUL EATER","is_primary":true},
+{"language":"ja-Latn","traits":["native"],"title":"SOUL EATER","is_primary":true},
+{"language":"ru","traits":[],"title":"Пожиратель душ","is_primary":true},
+{"language":"he","traits":[],"title":"אכלן הנשמות","is_primary":true}]}`
+	var d seriesDTO
+	if err := json.Unmarshal([]byte(soulEater), &d); err != nil {
+		t.Fatal(err)
+	}
+	s := d.toCore()
+	if s.Title != "SOUL EATER" {
+		t.Errorf("Title = %q, want SOUL EATER", s.Title)
+	}
+	want := []string{"Devorador de almas", "소울이터", "소울이터(SOUL EATER)", "Пожиратель душ", "אכלן הנשמות"}
+	if strings.Join(s.AltTitles, "|") != strings.Join(want, "|") {
+		t.Errorf("AltTitles = %q, want %q", s.AltTitles, want)
+	}
+
+	// Priority 3: no English, a primary "-Latn" title beats the first primary.
+	d = seriesDTO{ID: 8, Titles: []v2TitleDTO{
+		{Language: "ko", Title: "소울", IsPrimary: ptr(true)},
+		{Language: "ja-Latn", Title: "Sauru Iitaa", IsPrimary: ptr(true)},
+		{Language: "ja", Title: "ソウル", IsPrimary: ptr(true)}}}
+	if s = d.toCore(); s.Title != "Sauru Iitaa" {
+		t.Errorf("latn: Title = %q", s.Title)
+	}
+	// Priority 4: no English or Latn, first primary beats first title.
+	d = seriesDTO{ID: 9, Titles: []v2TitleDTO{
+		{Language: "ko", Title: "하나", IsPrimary: ptr(false)},
+		{Language: "ru", Title: "Два", IsPrimary: ptr(true)}}}
+	if s = d.toCore(); s.Title != "Два" {
+		t.Errorf("first primary: Title = %q", s.Title)
+	}
+}
+
+func ptr[T any](v T) *T { return &v }

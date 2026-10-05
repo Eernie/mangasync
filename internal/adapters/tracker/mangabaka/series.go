@@ -106,22 +106,23 @@ func (d seriesDTO) toCore() core.Series {
 	return s
 }
 
-// primaryV2Title picks the main title of a v2 series: the is_primary one, else the first
-// English one, else the first.
+// primaryV2Title picks the main title of a v2 series. MangaBaka marks one primary title per
+// language, so priority is: primary English, any English, primary "-Latn" (romanized),
+// any primary, first title.
 func (d seriesDTO) primaryV2Title() string {
-	for _, t := range d.Titles {
-		if t.IsPrimary != nil && *t.IsPrimary && t.Title != "" {
-			return t.Title
-		}
+	primary := func(t v2TitleDTO) bool { return t.IsPrimary != nil && *t.IsPrimary }
+	rules := []func(t v2TitleDTO) bool{
+		func(t v2TitleDTO) bool { return primary(t) && t.Language == "en" },
+		func(t v2TitleDTO) bool { return t.Language == "en" },
+		func(t v2TitleDTO) bool { return primary(t) && strings.HasSuffix(t.Language, "-Latn") },
+		primary,
+		func(v2TitleDTO) bool { return true },
 	}
-	for _, t := range d.Titles {
-		if t.Language == "en" && t.Title != "" {
-			return t.Title
-		}
-	}
-	for _, t := range d.Titles {
-		if t.Title != "" {
-			return t.Title
+	for _, rule := range rules {
+		for _, t := range d.Titles {
+			if t.Title != "" && rule(t) {
+				return t.Title
+			}
 		}
 	}
 	return ""
