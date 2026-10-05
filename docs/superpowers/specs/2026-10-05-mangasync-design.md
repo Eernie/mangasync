@@ -12,7 +12,7 @@ A small always-on service on Kubernetes that connects three kinds of services th
 
 v1 ships exactly one adapter per port: `komga`, `mangabaka`, `suwayomi`. The ports are shaped so that Kavita (reader), AniList / MyAnimeList (trackers) and other downloaders can be added later as new adapter packages without changing the sync logic.
 
-Non-goals (v1): two-way sync (Tracker → Reader), syncing ratings/notes/dates, multi-user, a UI, implementing any adapter beyond the three above.
+Non-goals (v1): two-way sync (Tracker → Reader), syncing ratings/notes, multi-user, a UI, implementing any adapter beyond the three above.
 
 ## Architecture: ports and adapters
 
@@ -54,20 +54,26 @@ type ReadProgress struct {
     BooksInProgress int     // partially read books
     LastReadNumber float64 // last continuously-read chapter/volume number
     MaxNumber      float64 // highest chapter/volume number present
+    FirstReadAt    time.Time // earliest read date of any read/in-progress book; zero = unknown
+    LastReadAt     time.Time // latest read date of any read/in-progress book; zero = unknown
 }
 
 type Status string // "considering" | "planning" | "reading" | "completed" | "paused" | "dropped" | "rereading" | "unknown"
 
 type Entry struct {
-    Status  Status
-    Chapter *float64
-    Volume  *float64
+    Status     Status
+    Chapter    *float64
+    Volume     *float64
+    StartDate  string // YYYY-MM-DD, "" = not set
+    FinishDate string // YYYY-MM-DD, "" = not set
 }
 
 type EntryUpdate struct { // nil fields are left unchanged
-    Status  *Status
-    Chapter *float64
-    Volume  *float64
+    Status     *Status
+    Chapter    *float64
+    Volume     *float64
+    StartDate  *string // YYYY-MM-DD
+    FinishDate *string // YYYY-MM-DD
 }
 ```
 
@@ -200,6 +206,15 @@ For one reader series, for each tracker in `TRACKERS` (failures in one tracker d
 
 The decision function (step 3) is a pure function `Decide(current *Entry, target Target) *EntryUpdate`, independent of any adapter.
 
+### Dates
+
+- **Start date** = the calendar date of the earliest `readProgress.readDate` of any read or in-progress book in the series.
+- **Finish date** = the calendar date of the latest `readProgress.readDate` of a read book, and only when the target status is `completed`.
+- Dates are civil dates (`YYYY-MM-DD`; `""` = no date), computed in the process time zone (`time.Local`, set with the standard `TZ` env var). `ComputeTarget(p, ended, loc)` does the conversion and fills `Target.StartDate` / `Target.FinishDate`.
+- `Decide` writes a date only when the tracker entry has no value for it yet. A date the user set is never overwritten. Protected statuses are never touched at all, dates included.
+- A date alone is a valid reason to write: a `reading` entry with up-to-date progress but no start date gets its start date filled.
+- Dates are not stored in the local store (`pushedState` is unchanged); the tracker entry is the source of truth.
+
 ## Download sync (Tracker → Downloader)
 
 Each poll: `ListLibrary(ACQUIRE_STATUSES ∪ RELEASE_STATUSES)`, `reader.ListAllSeries()` once, then per entry, using the `downloads` record for (tracker, tracker_id, downloader):
@@ -258,6 +273,7 @@ Core:
 | `DRY_RUN` | `false` | |
 | `DB_PATH` | `/data/mangasync.db` | |
 | `LOG_LEVEL` | `info` | |
+| `TZ` | system zone (UTC in the container) | time zone for start/finish dates; the container embeds `time/tzdata` |
 | `HTTP_ADDR` | `:8080` | `/healthz` |
 
 Adapter-specific vars are prefixed with the adapter name and only read when that adapter is selected (see each adapter below).
@@ -272,7 +288,7 @@ Env: `KOMGA_URL`, `KOMGA_API_KEY`, `KOMGA_VOLUME_LIBRARIES` (comma-separated lib
 - `ListStartedSeries`: `POST /api/v1/series/list?unpaged=true` with condition `anyOf readStatus is IN_PROGRESS / READ`.
 - `ListAllSeries`: same endpoint with `{}`; the list response already includes `metadata.title`, `alternateTitles` and `links`, so no per-series calls.
 - `GetSeries`: `GET /api/v1/series/{id}` → `metadata.title`, `metadata.alternateTitles`, `libraryId`; `IDs` from `metadata.links[].url` via `match.ParseLink`. Parse by URL, not label: live labels are `AniList`, `MangaUpdates`, `MyAnimeList`, `Kitsu`, `Anime-Planet`, `MangaDex`, plus shop/official links to ignore. No `MangaBaka` links exist on the live instance, and 16 of 28 series have no links at all, so title search is a primary path, not an edge case.
-- `GetProgress`: `GET /api/v2/series/{id}/read-progress/tachiyomi` → `lastReadContinuousNumberSort`, `maxNumberSort`, `booksCount`, `booksReadCount`, `booksInProgressCount`. Unit = volume if library in `KOMGA_VOLUME_LIBRARIES`, else chapter.
+- `GetProgress`: `GET /api/v2/series/{id}/read-progress/tachiyomi` → `lastReadContinuousNumberSort`, `maxNumberSort`, `booksCount`, `booksReadCount`, `booksInProgressCount`. Unit = volume if library in `KOMGA_VOLUME_LIBRARIES`, else chapter. When `booksReadCount + booksInProgressCount > 0`, two more calls fetch the dates: `POST /api/v1/books/list?size=1&sort=readProgress.readDate,asc` and `…,desc` with condition `allOf [seriesId is <ref>, anyOf [readStatus is READ, readStatus is IN_PROGRESS]]`; `content[0].readProgress.readDate` (RFC 3339) gives `FirstReadAt` (asc) and `LastReadAt` (desc). No extra calls when nothing is read or in progress.
 - `WatchProgress`: SSE `GET /sse/v1/events` with `X-API-Key` (verified: 200, `text/event-stream`). Format is `event:<Type>\ndata:<json>\n\n`; ignore other types (e.g. `TaskQueueStatus`). Emit `seriesId` from `ReadProgressSeriesChanged` / `ReadProgressSeriesDeleted`. Events are delivered only to the owning user, so the API key must belong to the reading user.
 
 ### Tracker `mangabaka` (implements `Tracker`, `LibraryLister`)
@@ -282,7 +298,7 @@ Env: `MANGABAKA_TOKEN` (Personal Access Token, `mb-…`).
 - Base `https://api.mangabaka.org`, header `x-api-key`, responses `{status, data, pagination?}`.
 - `Resolve`: `IDs["mangabaka"]` → done; else first of anilist / mangaupdates / mal / kitsu / animeplanet → `GET /v1/source/{anilist|manga-updates|my-anime-list|kitsu|anime-planet}/{id}` (verified: returns `data.series[]`, take the first `active` one); else `GET /v1/series/search?q=` + `match.Best` against `title`, `romanized_title` and `secondary_titles.*[].title`. Search returns near-duplicates (e.g. two Sasuke's Story entries), so `Best` must pick the highest score, not the first hit. Follow `merged_with` on merged series.
 - `SeriesEnded`: `GET /v1/series/{id}` → `status` in {`completed`, `cancelled`}. Enum: `cancelled, completed, hiatus, releasing, unknown, upcoming`. Cached in memory for the reconcile interval.
-- `GetEntry`: `GET /v1/my/library/{id}` (404 → nil). `SaveEntry`: `PATCH` (or `POST` if absent) with `state`, `progress_chapter`, `progress_volume`.
+- `GetEntry`: `GET /v1/my/library/{id}` (404 → nil). `SaveEntry`: `PATCH` (or `POST` if absent) with `state`, `progress_chapter`, `progress_volume`, `start_date`, `finish_date` (`YYYY-MM-DD`). `GetEntry` reads the first 10 characters of `start_date` / `finish_date` (the API may return `2026-06-06` or a full timestamp).
 - `ListLibrary`: `GET /v2/my/library?state=<s>&limit=100` (paged), once per requested MangaBaka state (or unfiltered and filtered locally if the API rejects repeated `state`). Must be v2: v1 list items carry no series ID. v2 items are `{entry, lists, series}` with the full series object (`id`, titles, `secondary_titles`, `source`).
 - Progress fields are JSON numbers with no `multipleOf` in the spec, so decimals (e.g. 10.5) are sent as-is. A submitted `0` is stored as null.
 - Status map: `considering` → considering; `plan_to_read` → planning; `reading` → reading; `completed` → completed; `paused`, `on_hold` → paused; `dropped` → dropped; `rereading` → rereading; else unknown. Reverse is the same table (only `reading`/`completed` are ever written).

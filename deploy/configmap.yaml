@@ -18,3 +18,5 @@ data:
   DOWNLOAD_INTERVAL: 15m
   RECONCILE_INTERVAL: 1h
   LOG_LEVEL: info
+  # Time zone for start/finish dates written to the tracker.
+  TZ: Europe/Amsterdam

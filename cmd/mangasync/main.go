@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	_ "time/tzdata" // distroless has no zoneinfo; lets TZ work in the container
 
 	"mangasync/internal/adapters/registry"
 	"mangasync/internal/app"

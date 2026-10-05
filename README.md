@@ -35,7 +35,11 @@ The ConfigMap starts with `DRY_RUN: "true"`. Watch `kubectl logs deploy/mangasyn
 
 Core: `READER`, `TRACKERS`, `DOWNLOAD_TRACKER`, `DOWNLOADER`, `ACQUIRE_STATUSES`, `RELEASE_STATUSES`,
 `DOWNLOAD_INTERVAL`, `RECONCILE_INTERVAL`, `SSE_DEBOUNCE`, `MATCH_THRESHOLD`, `DRY_RUN`, `DB_PATH`,
-`LOG_LEVEL`, `HTTP_ADDR`.
+`LOG_LEVEL`, `HTTP_ADDR`, `TZ`.
+
+Start and finish reading dates are copied from Komga to MangaBaka (only when MangaBaka has none yet).
+They are calendar dates in the `TZ` time zone (default: the system zone, UTC in the container; the
+ConfigMap sets `Europe/Amsterdam`).
 
 Komga: `KOMGA_URL`, `KOMGA_API_KEY`, `KOMGA_VOLUME_LIBRARIES`.
 MangaBaka: `MANGABAKA_TOKEN`, `MANGABAKA_URL` (optional).
