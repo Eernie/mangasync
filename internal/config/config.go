@@ -56,18 +56,21 @@ func Load(l envutil.Lookup) (Config, error) {
 		{"RECONCILE_INTERVAL", "1h", &c.ReconcileInterval},
 		{"SSE_DEBOUNCE", "10s", &c.SSEDebounce},
 	} {
-		v, err := time.ParseDuration(cmp.Or(envutil.Get(l, d.key), d.def))
+		raw := cmp.Or(envutil.Get(l, d.key), d.def)
+		v, err := time.ParseDuration(raw)
 		if err != nil || v <= 0 {
-			return c, fmt.Errorf("%s: must be a positive duration like %q", d.key, d.def)
+			return c, fmt.Errorf("%s: must be a positive duration like %q, got %q", d.key, d.def, raw)
 		}
 		*d.dst = v
 	}
-	if c.MatchThreshold, err = strconv.ParseFloat(cmp.Or(envutil.Get(l, "MATCH_THRESHOLD"), "0.9"), 64); err != nil ||
-		c.MatchThreshold <= 0 || c.MatchThreshold > 1 {
-		return c, errors.New("MATCH_THRESHOLD: must be a number in (0, 1]")
+	rawThreshold := cmp.Or(envutil.Get(l, "MATCH_THRESHOLD"), "0.9")
+	if c.MatchThreshold, err = strconv.ParseFloat(rawThreshold, 64); err != nil ||
+		!(c.MatchThreshold > 0 && c.MatchThreshold <= 1) {
+		return c, fmt.Errorf("MATCH_THRESHOLD: must be a number in (0, 1], got %q", rawThreshold)
 	}
-	if c.DryRun, err = strconv.ParseBool(cmp.Or(envutil.Get(l, "DRY_RUN"), "false")); err != nil {
-		return c, errors.New("DRY_RUN: must be true or false")
+	rawDryRun := cmp.Or(envutil.Get(l, "DRY_RUN"), "false")
+	if c.DryRun, err = strconv.ParseBool(rawDryRun); err != nil {
+		return c, fmt.Errorf("DRY_RUN: must be true or false, got %q", rawDryRun)
 	}
 
 	if len(c.Trackers) == 0 {

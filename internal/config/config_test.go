@@ -53,6 +53,7 @@ func TestInvalid(t *testing.T) {
 		"bad duration":               {"RECONCILE_INTERVAL": "soon"},
 		"zero duration":              {"DOWNLOAD_INTERVAL": "0s"},
 		"bad threshold":              {"MATCH_THRESHOLD": "1.5"},
+		"NaN threshold":              {"MATCH_THRESHOLD": "NaN"},
 		"bad bool":                   {"DRY_RUN": "maybe"},
 		"no trackers":                {"TRACKERS": " , "},
 	}
