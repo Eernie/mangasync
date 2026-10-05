@@ -13,8 +13,12 @@ var editionSuffix = regexp.MustCompile(`(?i)\s*[\(\[]\s*(?:(?:official|digital|f
 // edition ("Naruto (Color)") can match the original series ("Naruto"). It reports whether
 // anything was stripped; the result is never empty.
 func StripEdition(title string) (string, bool) {
-	stripped := strings.TrimSpace(editionSuffix.ReplaceAllString(title, ""))
-	if stripped == "" || stripped == title {
+	loc := editionSuffix.FindStringIndex(title)
+	if loc == nil {
+		return title, false
+	}
+	stripped := strings.TrimSpace(title[:loc[0]])
+	if stripped == "" {
 		return title, false
 	}
 	return stripped, true

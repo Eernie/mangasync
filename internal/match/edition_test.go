@@ -15,6 +15,8 @@ func TestStripEdition(t *testing.T) {
 		{"JoJo (Full Color Edition)", "JoJo", true},
 		{"Akira (colour)", "Akira", true},
 		{"Bleach (COLOURED VERSION)  ", "Bleach", true},
+		{"Naruto ", "Naruto ", false},
+		{"  Naruto", "  Naruto", false},
 		{"Re:Zero (Arc 2)", "Re:Zero (Arc 2)", false},
 		{"Kaiju No. 8 (2020)", "Kaiju No. 8 (2020)", false},
 		{"Naruto Color Edition", "Naruto Color Edition", false},
