@@ -23,8 +23,9 @@ func FromEnv(l envutil.Lookup, threshold float64) (*Client, error) {
 	if cfg.URL == "" || len(cfg.Sources) == 0 {
 		return nil, errors.New("suwayomi: SUWAYOMI_URL and SUWAYOMI_SOURCES are required")
 	}
-	// Source searches go through the source website and can be slow.
-	hc := httpx.New(2*time.Minute, 0)
+	// Source searches go through the source website and can be slow. They hit scraped third-party
+	// sites (Find makes up to 3 queries x N sources), so throttle to 30 requests/minute.
+	hc := httpx.New(2*time.Minute, 30)
 	// A stuck search would otherwise take 2 min x 5 attempts; cap the retries.
 	hc.MaxAttempts = 2
 	return New(cfg, hc)
