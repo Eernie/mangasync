@@ -20,6 +20,21 @@ import (
 type watchReader struct {
 	*coretest.FakeReader
 	events chan string
+	hidden map[string]bool // refs left out of ListAllSeries: they only arrive via a live event
+}
+
+func (w *watchReader) ListAllSeries(ctx context.Context) ([]core.Series, error) {
+	all, err := w.FakeReader.ListAllSeries(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []core.Series
+	for _, s := range all {
+		if !w.hidden[s.Ref] {
+			out = append(out, s)
+		}
+	}
+	return out, nil
 }
 
 func (w *watchReader) WatchProgress(ctx context.Context) (<-chan string, error) {
@@ -64,18 +79,23 @@ func TestAppRunsAllLoops(t *testing.T) {
 			Series: map[string]core.Series{
 				"S1": {Ref: "S1", Title: "Chainsaw Man"},
 				"S2": {Ref: "S2", Title: "Dandadan"},
+				"S3": {Ref: "S3", Title: "Berserk"},
+				"S4": {Ref: "S4", Title: "Vagabond"},
 			},
 			Progress: map[string]core.ReadProgress{
 				"S1": {Unit: core.UnitChapter, BooksTotal: 10, BooksRead: 2, LastReadNumber: 2},
 				"S2": {Unit: core.UnitChapter, BooksTotal: 10, BooksRead: 3, LastReadNumber: 3},
+				"S3": {Unit: core.UnitChapter, BooksTotal: 10}, // unstarted, not in the tracker list
+				"S4": {Unit: core.UnitChapter, BooksTotal: 10}, // unstarted, already in the tracker list
 			},
-			Started: []string{"S1"}, // S2 only arrives via a live event
 		},
 		events: make(chan string, 1),
+		hidden: map[string]bool{"S2": true}, // S2 only arrives via a live event
 	}
 	tr := &coretest.FakeTracker{
 		TrackerName: "mangabaka",
-		IDsByRef:    map[string]string{"S1": "1", "S2": "2"},
+		IDsByRef:    map[string]string{"S1": "1", "S2": "2", "S3": "3", "S4": "4"},
+		Entries:     map[string]*core.Entry{"4": {Status: core.StatusDropped}},
 		Library:     []core.LibraryEntry{{Series: core.Series{Ref: "9", Title: "Frieren"}, Status: core.StatusPlanning}},
 	}
 	dl := &coretest.FakeDownloader{DownloaderName: "suwayomi", Search: map[string]core.Candidate{"9": {Ref: "130", Title: "Frieren"}}}
@@ -99,9 +119,20 @@ func TestAppRunsAllLoops(t *testing.T) {
 		return ids
 	}
 	eventually(t, func() bool { return savedIDs()["1"] })                   // reconcile at startup
+	eventually(t, func() bool { return savedIDs()["3"] })                   // unstarted series: planning
 	eventually(t, func() bool { return len(dl.AcquiredCandidates()) == 1 }) // download sync at startup
 	reader.events <- "S2"
 	eventually(t, func() bool { return savedIDs()["2"] }) // live event
+
+	eventually(t, func() bool { return tr.ResolveCallCount() == 4 }) // S4 has been looked at too
+	for _, sv := range tr.SavedEntries() {
+		if sv.ID == "3" && (sv.Update.Status == nil || *sv.Update.Status != core.StatusPlanning || sv.Update.Chapter != nil) {
+			t.Errorf("unstarted series saved as %+v, want status planning only", sv.Update)
+		}
+		if sv.ID == "4" {
+			t.Errorf("existing tracker entry was modified: %+v", sv.Update)
+		}
+	}
 
 	cancel()
 	select {

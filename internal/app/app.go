@@ -75,10 +75,10 @@ func (a *App) worker(ctx context.Context) {
 }
 
 func (a *App) reconcile(ctx context.Context) {
-	series, err := a.Reader.ListStartedSeries(ctx)
+	series, err := a.Reader.ListAllSeries(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
-			a.Log.Error("reconcile: list started series", "err", err)
+			a.Log.Error("reconcile: list series", "err", err)
 		}
 		return
 	}
