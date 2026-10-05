@@ -93,6 +93,7 @@ type Candidate struct {
 	Score      float64
 }
 
+// Reader is a service where the user reads manga, e.g. Komga.
 type Reader interface {
 	Name() string
 	ListStartedSeries(ctx context.Context) ([]Series, error) // series with any read progress
@@ -107,6 +108,7 @@ type ProgressWatcher interface {
 	WatchProgress(ctx context.Context) (<-chan string, error)
 }
 
+// Tracker is a list/tracking service, e.g. MangaBaka.
 type Tracker interface {
 	Name() string
 	// Resolve finds this tracker's series ID for a reader series: s.IDs first, title search last.
@@ -114,6 +116,7 @@ type Tracker interface {
 	// SeriesEnded reports whether publication has finished (completed or cancelled).
 	SeriesEnded(ctx context.Context, id string) (bool, error)
 	GetEntry(ctx context.Context, id string) (*Entry, error) // nil, nil if not in the user's list
+	// SaveEntry creates the entry if it is not in the user's list yet, otherwise applies a partial update.
 	SaveEntry(ctx context.Context, id string, u EntryUpdate) error
 }
 
@@ -122,11 +125,14 @@ type LibraryLister interface {
 	ListLibrary(ctx context.Context, statuses []Status) ([]LibraryEntry, error)
 }
 
+// Downloader fetches manga from online sources, e.g. Suwayomi.
 type Downloader interface {
 	Name() string
 	// FindInLibrary matches s against the downloader's own library only (no source searches).
+	// Returns nil, nil when nothing matches.
 	FindInLibrary(ctx context.Context, s Series) (*Candidate, error)
 	// Find searches the downloader's sources. best is nil when nothing passes the threshold.
+	// nearMisses are the closest rejected candidates, for logging.
 	Find(ctx context.Context, s Series) (best *Candidate, nearMisses []Candidate, err error)
 	// Acquire adds the candidate to the library and queues every not-yet-downloaded chapter. Idempotent.
 	Acquire(ctx context.Context, c Candidate) error
