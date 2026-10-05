@@ -29,7 +29,7 @@ func main() {
 	}
 }
 
-func run() error {
+func run() (err error) {
 	cfg, err := config.Load(os.LookupEnv)
 	if err != nil {
 		return err
@@ -42,6 +42,30 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Start the health server first: adapter init (Suwayomi) can take minutes, and the
+	// liveness probe must not fail during a slow start.
+	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: healthHandler(), ReadHeaderTimeout: 5 * time.Second}
+	srvErr := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("health server failed", "err", err)
+			srvErr <- err
+			stop()
+		}
+	}()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if serr := srv.Shutdown(shutdownCtx); serr != nil {
+			err = errors.Join(err, serr)
+		}
+		select {
+		case herr := <-srvErr:
+			err = errors.Join(err, fmt.Errorf("health server: %w", herr))
+		default:
+		}
+	}()
 
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
@@ -101,31 +125,12 @@ func run() error {
 		}
 	}
 
-	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: healthHandler(), ReadHeaderTimeout: 5 * time.Second}
-	srvErr := make(chan error, 1)
-	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Error("health server failed", "err", err)
-			srvErr <- err
-			stop()
-		}
-	}()
-
 	log.Info("mangasync started", "reader", cfg.Reader, "trackers", cfg.Trackers,
 		"download_tracker", cfg.DownloadTracker, "downloader", cfg.Downloader, "dry_run", cfg.DryRun)
 	a.Run(ctx)
 	stop() // restore default signal handling so a second SIGTERM/Ctrl-C kills a stuck shutdown
 	log.Info("shutting down")
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	shutdownErr := srv.Shutdown(shutdownCtx)
-	select {
-	case err := <-srvErr:
-		return fmt.Errorf("health server: %w", err)
-	default:
-	}
-	return shutdownErr
+	return nil
 }
 
 func healthHandler() http.Handler {
