@@ -1,6 +1,9 @@
 package match
 
-import "sort"
+import (
+	"slices"
+	"sort"
+)
 
 // Scored pairs an item with its match score.
 type Scored[T any] struct {
@@ -8,10 +11,13 @@ type Scored[T any] struct {
 	Score float64
 }
 
-// Score is the best Similarity between any wanted title and any candidate title.
+// Score is the best Similarity between any wanted title and any candidate title. Both sides
+// are also compared without a trailing colour-edition marker, so "Naruto (Color)" and
+// "Naruto" count as the same series.
 func Score(want, have []string) float64 {
 	best := 0.0
-	for _, w := range want {
+	have = withEditionVariants(have)
+	for _, w := range withEditionVariants(want) {
 		for _, h := range have {
 			if s := Similarity(w, h); s > best {
 				best = s
@@ -41,4 +47,16 @@ func Best[T any](want []string, candidates []T, titlesOf func(T) []string, thres
 		rejected = rejected[:3]
 	}
 	return best, rejected
+}
+
+// withEditionVariants returns titles plus, for each title carrying a colour-edition suffix,
+// the stripped variant (unless already present).
+func withEditionVariants(titles []string) []string {
+	out := slices.Clone(titles)
+	for _, t := range titles {
+		if stripped, ok := StripEdition(t); ok && !slices.Contains(out, stripped) {
+			out = append(out, stripped)
+		}
+	}
+	return out
 }

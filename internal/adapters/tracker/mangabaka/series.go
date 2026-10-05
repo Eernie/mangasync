@@ -252,16 +252,13 @@ func (c *Client) followMerged(ctx context.Context, id string) (string, bool, err
 }
 
 // searchTitle searches by the main title. A coloured edition ("Naruto (Color)") is also
-// scored against, and if needed searched as, the original series ("Naruto").
+// matched as, and if needed searched as, the original series ("Naruto").
 func (c *Client) searchTitle(ctx context.Context, s core.Series) (string, bool, error) {
 	if s.Title == "" {
 		return "", false, nil
 	}
-	want := s.Titles()
+	want := s.Titles() // match.Score also compares the edition-stripped variants
 	stripped, hasEdition := match.StripEdition(s.Title)
-	if hasEdition {
-		want = append(want, stripped)
-	}
 	if id, found, err := c.searchOnce(ctx, s.Title, want); err != nil || found || !hasEdition {
 		return id, found, err
 	}

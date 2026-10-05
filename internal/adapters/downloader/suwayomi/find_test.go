@@ -89,6 +89,17 @@ func TestFindInLibraryIsCached(t *testing.T) {
 	}
 }
 
+func TestFindInLibraryMatchesColourEdition(t *testing.T) {
+	f := newFakeServer(t)
+	f.library = `[{"id":61,"title":"Boruto - Naruto Next Generations"},{"id":63,"title":"Naruto (Color)"}]`
+	c := newTestClient(t, f, Config{})
+
+	got, err := c.FindInLibrary(t.Context(), core.Series{Title: "NARUTO"})
+	if err != nil || got == nil || got.Ref != "63" {
+		t.Fatalf("got %+v, %v; want ref 63", got, err)
+	}
+}
+
 func TestFindStopsWhenContextCancelled(t *testing.T) {
 	f := newFakeServer(t)
 	c := newTestClient(t, f, Config{})

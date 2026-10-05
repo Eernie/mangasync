@@ -117,6 +117,23 @@ func TestAlreadyInReaderIsSkipped(t *testing.T) {
 	}
 }
 
+// A fresh database has no series mappings yet (download sync runs in parallel with the first
+// reconcile), so the reader check must recognise a coloured edition by title alone.
+func TestColourEditionInReaderIsSkippedWithoutMapping(t *testing.T) {
+	fx := newFixture(t, entry("270", "NARUTO", core.StatusPlanning, core.IDs{core.IDAniList: "30011"}))
+	fx.reader.Series["K1"] = core.Series{Ref: "K1", Title: "Naruto (Color)"}
+	fx.dl.Search["270"] = core.Candidate{Ref: "9", Title: "Naruto", SourceName: "Weeb Central (EN)"}
+
+	fx.run(t)
+
+	if fx.dl.FindCallCount() != 0 || len(fx.dl.AcquiredCandidates()) != 0 {
+		t.Fatalf("find=%d acquired=%v; want none", fx.dl.FindCallCount(), fx.dl.AcquiredCandidates())
+	}
+	if fx.record(t, "270") != nil {
+		t.Fatal("already-in-reader must not write records")
+	}
+}
+
 func TestNotFoundBacksOff(t *testing.T) {
 	fx := newFixture(t, entry("1", "Obscure", core.StatusPlanning, nil))
 
