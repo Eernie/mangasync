@@ -280,3 +280,18 @@ func TestUnstartedSeriesIsPlannedOnlyWhenNotInTrackerList(t *testing.T) {
 		}
 	}
 }
+
+func TestEmptySeriesIsSkippedBeforeResolving(t *testing.T) {
+	tr := &coretest.FakeTracker{TrackerName: "mangabaka", IDsByRef: map[string]string{"S1": "1"}}
+	st := newStore(t)
+	s := &Syncer{Reader: reader(core.ReadProgress{Unit: core.UnitChapter}), Trackers: []core.Tracker{tr}, Store: st, Log: quietLog()}
+	if err := s.SyncSeries(t.Context(), "S1"); err != nil {
+		t.Fatal(err)
+	}
+	if tr.ResolveCallCount() != 0 || len(tr.SavedEntries()) != 0 {
+		t.Fatalf("resolve calls = %d, saves = %v; want none", tr.ResolveCallCount(), tr.SavedEntries())
+	}
+	if m, _ := st.GetMapping(t.Context(), "komga", "S1", "mangabaka"); m != nil {
+		t.Fatalf("mapping written for an empty series: %+v", m)
+	}
+}

@@ -38,6 +38,9 @@ func (s *Syncer) SyncSeries(ctx context.Context, ref string) error {
 		s.Log.Error("progress sync failed", "ref", ref, "step", "get progress", "err", err)
 		return fmt.Errorf("get progress %s: %w", ref, err)
 	}
+	if prog.BooksTotal == 0 { // empty series: nothing to track, don't spend a tracker search on it
+		return nil
+	}
 	var errs []error
 	for _, tr := range s.Trackers {
 		if ctx.Err() != nil {
