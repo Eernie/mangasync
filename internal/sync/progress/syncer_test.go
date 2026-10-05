@@ -218,6 +218,21 @@ func TestSyncWritesStartDateInConfiguredLocation(t *testing.T) {
 	}
 }
 
+func TestSyncTwiceWithDatesSavesOnce(t *testing.T) {
+	first := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
+	tr := &coretest.FakeTracker{TrackerName: "mangabaka", IDsByRef: map[string]string{"S1": "1"}}
+	s := &Syncer{Reader: reader(core.ReadProgress{Unit: core.UnitChapter, BooksTotal: 10, BooksRead: 2, LastReadNumber: 2, FirstReadAt: first}),
+		Trackers: []core.Tracker{tr}, Store: newStore(t), Log: quietLog(), Location: time.UTC}
+	for range 2 {
+		if err := s.SyncSeries(t.Context(), "S1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := len(tr.SavedEntries()); n != 1 {
+		t.Fatalf("saves = %d, want 1", n)
+	}
+}
+
 func TestSyncFillsMissingStartDateOnUpToDateEntry(t *testing.T) {
 	first := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
 	ch := 2.0

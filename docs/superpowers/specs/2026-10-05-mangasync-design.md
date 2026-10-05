@@ -212,6 +212,8 @@ The decision function (step 3) is a pure function `Decide(current *Entry, target
 - **Finish date** = the calendar date of the latest `readProgress.readDate` of a read book, and only when the target status is `completed`.
 - Dates are civil dates (`YYYY-MM-DD`; `""` = no date), computed in the process time zone (`time.Local`, set with the standard `TZ` env var). `ComputeTarget(p, ended, loc)` does the conversion and fills `Target.StartDate` / `Target.FinishDate`.
 - `Decide` writes a date only when the tracker entry has no value for it yet. A date the user set is never overwritten. Protected statuses are never touched at all, dates included.
+- A finish date earlier than a start date already on the entry is skipped, so the tracker never ends up with finish < start.
+- The Komga date lookups are best effort: if they fail, progress sync continues with unknown (zero) dates.
 - A date alone is a valid reason to write: a `reading` entry with up-to-date progress but no start date gets its start date filled.
 - Dates are not stored in the local store (`pushedState` is unchanged); the tracker entry is the source of truth.
 

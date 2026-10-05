@@ -142,21 +142,16 @@ func (c *Client) GetProgress(ctx context.Context, ref string) (core.ReadProgress
 		LastReadNumber: d.LastReadContinuousNumberSort, MaxNumber: d.MaxNumberSort,
 	}
 	if d.BooksReadCount+d.BooksInProgressCount > 0 {
-		var err error
-		if p.FirstReadAt, err = c.readDate(ctx, ref, "asc"); err != nil {
-			return core.ReadProgress{}, err
-		}
-		if p.LastReadAt, err = c.readDate(ctx, ref, "desc"); err != nil {
-			return core.ReadProgress{}, err
-		}
+		p.FirstReadAt = c.readDate(ctx, ref, "asc")
+		p.LastReadAt = c.readDate(ctx, ref, "desc")
 	}
 	return p, nil
 }
 
 // readDate returns the readProgress.readDate of the first read or in-progress book of the series
-// in the given sort order ("asc" = earliest, "desc" = latest). Zero time if there is none or the
-// date cannot be parsed: dates are optional and must not block progress sync.
-func (c *Client) readDate(ctx context.Context, seriesRef, order string) (time.Time, error) {
+// in the given sort order ("asc" = earliest, "desc" = latest). Zero time if there is none, the
+// request fails or the date cannot be parsed: dates are optional and must not block progress sync.
+func (c *Client) readDate(ctx context.Context, seriesRef, order string) time.Time {
 	body := map[string]any{"condition": map[string]any{"allOf": []any{
 		map[string]any{"seriesId": map[string]any{"operator": "is", "value": seriesRef}},
 		map[string]any{"anyOf": []any{readStatus("READ"), readStatus("IN_PROGRESS")}},
@@ -170,14 +165,14 @@ func (c *Client) readDate(ctx context.Context, seriesRef, order string) (time.Ti
 	}
 	endpoint := c.cfg.URL + "/api/v1/books/list?size=1&sort=readProgress.readDate," + order
 	if err := c.api.DoJSON(ctx, http.MethodPost, endpoint, c.header(), body, &page); err != nil {
-		return time.Time{}, err
+		return time.Time{}
 	}
 	if len(page.Content) == 0 {
-		return time.Time{}, nil
+		return time.Time{}
 	}
 	ts, err := time.Parse(time.RFC3339, page.Content[0].ReadProgress.ReadDate)
 	if err != nil {
-		return time.Time{}, nil
+		return time.Time{}
 	}
-	return ts, nil
+	return ts
 }

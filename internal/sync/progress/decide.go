@@ -116,7 +116,9 @@ func Decide(cur *core.Entry, t Target) *core.EntryUpdate {
 		u.StartDate = &d
 		changed = true
 	}
-	if t.FinishDate != "" && t.Status == core.StatusCompleted && (cur == nil || cur.FinishDate == "") {
+	// Never send a finish date earlier than a start date the user set (YYYY-MM-DD compares as text).
+	if t.FinishDate != "" && t.Status == core.StatusCompleted && (cur == nil || cur.FinishDate == "") &&
+		(cur == nil || cur.StartDate == "" || t.FinishDate >= cur.StartDate) {
 		d := t.FinishDate
 		u.FinishDate = &d
 		changed = true

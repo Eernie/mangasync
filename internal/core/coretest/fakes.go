@@ -135,6 +135,12 @@ func (f *FakeTracker) SaveEntry(_ context.Context, id string, u core.EntryUpdate
 		v := *u.Volume
 		e.Volume = &v
 	}
+	if u.StartDate != nil {
+		e.StartDate = *u.StartDate
+	}
+	if u.FinishDate != nil {
+		e.FinishDate = *u.FinishDate
+	}
 	return nil
 }
 

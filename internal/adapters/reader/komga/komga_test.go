@@ -36,10 +36,11 @@ const progressUnread = `{"booksCount":10,"booksReadCount":0,"booksUnreadCount":1
 
 type server struct {
 	*httptest.Server
-	mu         sync.Mutex
-	listBodies []string
-	getHits    int
-	bookLists  []string // "<sort>|<body>" of every POST /api/v1/books/list
+	mu             sync.Mutex
+	listBodies     []string
+	getHits        int
+	bookListStatus int      // non-zero: books/list answers with this status
+	bookLists      []string // "<sort>|<body>" of every POST /api/v1/books/list
 }
 
 func newServer(t *testing.T) *server {
@@ -81,7 +82,12 @@ func newServer(t *testing.T) *server {
 		sort := r.URL.Query().Get("sort")
 		s.mu.Lock()
 		s.bookLists = append(s.bookLists, sort+"|"+string(b))
+		status := s.bookListStatus
 		s.mu.Unlock()
+		if status != 0 {
+			http.Error(w, "boom", status)
+			return
+		}
 		if r.URL.Query().Get("size") != "1" {
 			t.Errorf("books/list size = %q, want 1", r.URL.Query().Get("size"))
 		}
@@ -254,5 +260,25 @@ func TestGetProgressWithoutReadBooksSkipsDateLookups(t *testing.T) {
 	defer srv.mu.Unlock()
 	if len(srv.bookLists) != 0 {
 		t.Errorf("books/list calls = %v, want none", srv.bookLists)
+	}
+}
+
+func TestGetProgressSurvivesDateLookupFailure(t *testing.T) {
+	srv := newServer(t)
+	srv.mu.Lock()
+	srv.bookListStatus = http.StatusInternalServerError
+	srv.mu.Unlock()
+	api := httpx.New(5*time.Second, 0)
+	api.BaseDelay, api.MaxAttempts = time.Millisecond, 2
+	c := New(Config{URL: srv.URL, APIKey: "secret"}, api)
+	p, err := c.GetProgress(t.Context(), "S1")
+	if err != nil {
+		t.Fatalf("GetProgress failed on date lookup error: %v", err)
+	}
+	if p.BooksTotal != 244 || p.BooksRead != 104 || p.BooksInProgress != 1 || p.LastReadNumber != 104 || p.MaxNumber != 232 {
+		t.Errorf("progress = %+v", p)
+	}
+	if !p.FirstReadAt.IsZero() || !p.LastReadAt.IsZero() {
+		t.Errorf("dates = %v / %v, want zero", p.FirstReadAt, p.LastReadAt)
 	}
 }
