@@ -37,6 +37,9 @@ func IsStatus(err error, code int) bool {
 
 func IsNotFound(err error) bool { return IsStatus(err, http.StatusNotFound) }
 
+// maxRetryAfter caps how long a server-supplied Retry-After can stall a request.
+const maxRetryAfter = 2 * time.Minute
+
 type Client struct {
 	HTTP        *http.Client
 	Limiter     *rate.Limiter // nil = unlimited
@@ -59,6 +62,9 @@ func New(timeout time.Duration, perMinute int) *Client {
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	ctx := req.Context()
 	attempts := max(c.MaxAttempts, 1)
+	if req.Body != nil && req.Body != http.NoBody && req.GetBody == nil {
+		attempts = 1 // the body cannot be re-sent
+	}
 	var lastErr error
 	var retryAfter time.Duration
 	for i := range attempts {
@@ -69,7 +75,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		}
 		if c.Limiter != nil {
 			if err := c.Limiter.Wait(ctx); err != nil {
-				return nil, err
+				return nil, c.limiterError(ctx, err)
 			}
 		}
 		attempt := req.Clone(ctx)
@@ -144,6 +150,19 @@ func (c *Client) DoJSON(ctx context.Context, method, url string, header http.Hea
 	return nil
 }
 
+// limiterError maps a failed Limiter.Wait to the context's error so callers can detect
+// shutdown or a deadline with errors.Is. Wait also fails early, before the context is done,
+// when the wait would outlast the deadline; that is reported as context.DeadlineExceeded.
+func (c *Client) limiterError(ctx context.Context, err error) error {
+	if cerr := ctx.Err(); cerr != nil {
+		return cerr
+	}
+	if _, ok := ctx.Deadline(); ok && c.Limiter.Burst() >= 1 {
+		return fmt.Errorf("%w: %v", context.DeadlineExceeded, err)
+	}
+	return err
+}
+
 func (c *Client) backoff(attempt int, retryAfter time.Duration) time.Duration {
 	d := c.BaseDelay << (attempt - 1)
 	if c.BaseDelay > 0 {
@@ -156,6 +175,9 @@ func parseRetryAfter(v string) time.Duration {
 	n, err := strconv.Atoi(strings.TrimSpace(v))
 	if err != nil || n < 0 {
 		return 0
+	}
+	if n > int(maxRetryAfter/time.Second) { // also avoids overflow in the multiplication below
+		return maxRetryAfter
 	}
 	return time.Duration(n) * time.Second
 }
