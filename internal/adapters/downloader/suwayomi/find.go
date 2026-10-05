@@ -31,16 +31,18 @@ func mangaTitles(m mangaDTO) []string { return []string{m.Title} }
 
 // searchQueries: the main title, then up to two Latin-script alt titles.
 func searchQueries(s core.Series) []string {
-	var qs []string
+	var qs, seen []string
 	if s.Title != "" {
 		qs = append(qs, s.Title)
+		seen = append(seen, match.Normalize(s.Title))
 	}
 	for _, t := range s.AltTitles {
 		if len(qs) >= 3 {
 			break
 		}
-		if isLatin(t) && !slices.Contains(qs, t) {
+		if n := match.Normalize(t); isLatin(t) && !slices.Contains(seen, n) {
 			qs = append(qs, t)
+			seen = append(seen, n)
 		}
 	}
 	return qs
@@ -76,6 +78,9 @@ func (c *Client) Find(ctx context.Context, s core.Series) (*core.Candidate, []co
 				} `json:"fetchSourceManga"`
 			}
 			if err := c.gql(ctx, searchMutation, map[string]any{"source": src.ID, "q": q}, &out); err != nil {
+				if ctx.Err() != nil {
+					return nil, sortedNear(near), ctx.Err()
+				}
 				errs = append(errs, fmt.Errorf("search %s for %q: %w", src.Name, q, err))
 				continue
 			}
@@ -88,11 +93,16 @@ func (c *Client) Find(ctx context.Context, s core.Series) (*core.Candidate, []co
 			}
 		}
 	}
+	return nil, sortedNear(near), errors.Join(errs...)
+}
+
+// sortedNear returns the three best-scoring near misses.
+func sortedNear(near []core.Candidate) []core.Candidate {
 	sort.SliceStable(near, func(i, j int) bool { return near[i].Score > near[j].Score })
 	if len(near) > 3 {
 		near = near[:3]
 	}
-	return nil, near, errors.Join(errs...)
+	return near
 }
 
 // FindInLibrary matches s against the Suwayomi library (cached for a minute).

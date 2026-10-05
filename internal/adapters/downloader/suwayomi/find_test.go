@@ -1,6 +1,8 @@
 package suwayomi
 
 import (
+	"context"
+	"slices"
 	"testing"
 
 	"mangasync/internal/core"
@@ -84,5 +86,55 @@ func TestFindInLibraryIsCached(t *testing.T) {
 	}
 	if n := len(f.callsMatching("mangas(condition")); n != 1 {
 		t.Fatalf("library queries = %d, want 1 (cached)", n)
+	}
+}
+
+func TestFindStopsWhenContextCancelled(t *testing.T) {
+	f := newFakeServer(t)
+	c := newTestClient(t, f, Config{})
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	s := core.Series{Title: "One", AltTitles: []string{"Two", "Three"}}
+	_, _, err := c.Find(ctx, s)
+	if err != context.Canceled { // exactly ctx.Err(), not a joined list of per-source errors
+		t.Fatalf("err = %v, want exactly context.Canceled", err)
+	}
+	if n := len(f.callsMatching("fetchSourceManga")); n > 1 {
+		t.Fatalf("fetchSourceManga calls = %d, want at most 1", n)
+	}
+}
+
+func TestSearchQueriesDedupeByNormalizedTitle(t *testing.T) {
+	s := core.Series{Title: "Chainsaw Man", AltTitles: []string{"Chainsaw man", "CHAINSAW  MAN", "Chensawman"}}
+	got := searchQueries(s)
+	want := []string{"Chainsaw Man", "Chensawman"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("queries = %q, want %q", got, want)
+	}
+}
+
+func TestSearchQueriesCapAtThree(t *testing.T) {
+	s := core.Series{Title: "Main", AltTitles: []string{"Alt One", "Alt Two", "Alt Three", "Alt Four"}}
+	got := searchQueries(s)
+	if want := []string{"Main", "Alt One", "Alt Two"}; !slices.Equal(got, want) {
+		t.Fatalf("queries = %q, want %q", got, want)
+	}
+
+	f := newFakeServer(t)
+	c := newTestClient(t, f, Config{})
+	if _, _, err := c.Find(t.Context(), s); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(f.callsMatching("fetchSourceManga")); n != 3*2 {
+		t.Fatalf("fetchSourceManga calls = %d, want 6 (3 queries x 2 sources)", n)
+	}
+}
+
+func TestIsLatin(t *testing.T) {
+	for in, want := range map[string]bool{"86": false, "Pokémon": true, "葬送のフリーレン": false, "Frieren 2": true, "": false} {
+		if got := isLatin(in); got != want {
+			t.Errorf("isLatin(%q) = %v, want %v", in, got, want)
+		}
 	}
 }
