@@ -1,3 +1,6 @@
 .env
 *.db
 /bin/
+*.db-wal
+*.db-shm
+smoke.log
