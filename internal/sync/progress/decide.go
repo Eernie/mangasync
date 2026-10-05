@@ -4,6 +4,7 @@ package progress
 import (
 	"strconv"
 	"strings"
+	"time"
 
 	"mangasync/internal/core"
 )
@@ -13,11 +14,19 @@ type Target struct {
 	Status   core.Status
 	Progress *float64 // nil = don't send progress
 	Unit     core.Unit
+	// StartDate and FinishDate are civil dates (YYYY-MM-DD) or "". FinishDate is only set
+	// when Status is completed.
+	StartDate  string
+	FinishDate string
 }
 
-// ComputeTarget maps reader progress to a target status/progress. ended is the tracker's
-// publication status and only matters when every book is read. Returns nil if nothing was read.
-func ComputeTarget(p core.ReadProgress, ended bool) *Target {
+const dateLayout = "2006-01-02"
+
+// ComputeTarget maps reader progress to a target status/progress/dates. ended is the tracker's
+// publication status and only matters when every book is read. Dates are calendar dates in loc
+// (nil = time.Local); the finish date is only set for a completed target.
+// Returns nil if nothing was read.
+func ComputeTarget(p core.ReadProgress, ended bool, loc *time.Location) *Target {
 	t := &Target{Unit: p.Unit}
 	switch {
 	case p.AllRead():
@@ -34,7 +43,22 @@ func ComputeTarget(p core.ReadProgress, ended bool) *Target {
 	default:
 		return nil
 	}
+	if loc == nil {
+		loc = time.Local
+	}
+	t.StartDate = civilDate(p.FirstReadAt, loc)
+	if t.Status == core.StatusCompleted {
+		t.FinishDate = civilDate(p.LastReadAt, loc)
+	}
 	return t
+}
+
+// civilDate formats the calendar date of ts in loc, or "" for the zero time.
+func civilDate(ts time.Time, loc *time.Location) string {
+	if ts.IsZero() {
+		return ""
+	}
+	return ts.In(loc).Format(dateLayout)
 }
 
 // positive returns nil for values <= 0: trackers store 0 as "nothing recorded".
@@ -47,6 +71,7 @@ func positive(v float64) *float64 {
 
 // Decide returns the update that moves cur towards t, or nil if nothing should change.
 // Protected statuses are never touched, status never moves backwards and progress never goes down.
+// Dates are only filled in when the entry has none yet; an existing date is never overwritten.
 func Decide(cur *core.Entry, t Target) *core.EntryUpdate {
 	if cur != nil {
 		switch cur.Status {
@@ -86,6 +111,16 @@ func Decide(cur *core.Entry, t Target) *core.EntryUpdate {
 			changed = true
 		}
 	}
+	if t.StartDate != "" && (cur == nil || cur.StartDate == "") {
+		d := t.StartDate
+		u.StartDate = &d
+		changed = true
+	}
+	if t.FinishDate != "" && t.Status == core.StatusCompleted && (cur == nil || cur.FinishDate == "") {
+		d := t.FinishDate
+		u.FinishDate = &d
+		changed = true
+	}
 	if !changed {
 		return nil
 	}
@@ -113,6 +148,12 @@ func describe(u core.EntryUpdate) string {
 	}
 	if u.Volume != nil {
 		parts = append(parts, "volume="+describeFloat(*u.Volume))
+	}
+	if u.StartDate != nil {
+		parts = append(parts, "start="+*u.StartDate)
+	}
+	if u.FinishDate != nil {
+		parts = append(parts, "finish="+*u.FinishDate)
 	}
 	return strings.Join(parts, " ")
 }

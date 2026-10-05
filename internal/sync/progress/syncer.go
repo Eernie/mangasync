@@ -64,7 +64,7 @@ func (s *Syncer) syncTracker(ctx context.Context, series core.Series, prog core.
 			return fmt.Errorf("series ended: %w", err)
 		}
 	}
-	target := ComputeTarget(prog, ended)
+	target := ComputeTarget(prog, ended, nil)
 	if target == nil {
 		return nil
 	}
