@@ -137,7 +137,3 @@ func (c *Client) GetProgress(ctx context.Context, ref string) (core.ReadProgress
 		LastReadNumber: d.LastReadContinuousNumberSort, MaxNumber: d.MaxNumberSort,
 	}, nil
 }
-
-func (c *Client) WatchProgress(ctx context.Context) (<-chan string, error) {
-	panic("implemented in Task 13")
-}
