@@ -1,6 +1,7 @@
 package download
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -224,5 +225,71 @@ func TestNotFoundBackoffSchedule(t *testing.T) {
 		if got := NotFoundBackoff(i + 1); got != w {
 			t.Errorf("NotFoundBackoff(%d) = %v, want %v", i+1, got, w)
 		}
+	}
+}
+
+func TestDroppedThenReacquiredEvenThoughKeptFilesAreInReader(t *testing.T) {
+	fx := newFixture(t, entry("1", "Fire Force", core.StatusDropped, nil))
+	fx.dl.Library["1"] = core.Candidate{Ref: "50", Title: "Fire Force", SourceName: "Src"}
+	fx.run(t)
+	if r := fx.record(t, "1"); r.Status != store.Released || r.CandidateRef != "50" {
+		t.Fatalf("record = %+v", r)
+	}
+
+	// Released files stay on disk, so the reader now has the series.
+	fx.reader.Series["K1"] = core.Series{Ref: "K1", Title: "Fire Force"}
+	fx.tr.SetLibrary([]core.LibraryEntry{entry("1", "Fire Force", core.StatusPlanning, nil)})
+	fx.dl.SetLibrary(map[string]core.Candidate{})
+	fx.dl.Search["1"] = core.Candidate{Ref: "50", Title: "Fire Force"}
+	fx.run(t)
+	if got := fx.dl.AcquiredCandidates(); len(got) != 1 || got[0].Ref != "50" {
+		t.Fatalf("re-acquired = %+v", got)
+	}
+}
+
+func TestInProgressWithCandidateIgnoresReaderCheck(t *testing.T) {
+	fx := newFixture(t, entry("1", "Frieren", core.StatusPlanning, nil))
+	fx.dl.Search["1"] = core.Candidate{Ref: "130", Title: "Frieren"}
+	fx.dl.SetAcquireErr(errors.New("suwayomi down"))
+	if err := fx.s.Run(t.Context()); err == nil {
+		t.Fatal("expected error")
+	}
+	// Part of the chapters made it into the reader before the failure.
+	fx.reader.Series["K1"] = core.Series{Ref: "K1", Title: "Frieren"}
+	fx.dl.SetAcquireErr(nil)
+	fx.run(t)
+	if len(fx.dl.AcquiredCandidates()) != 1 || fx.record(t, "1").Status != store.Acquired {
+		t.Fatal("expected the in-progress acquire to be retried")
+	}
+}
+
+func TestReleasedWithoutCandidateStillRespectsReaderCheck(t *testing.T) {
+	fx := newFixture(t, entry("1", "Never had it", core.StatusDropped, nil))
+	fx.run(t) // not in the downloader: released record without a candidate
+	if r := fx.record(t, "1"); r.Status != store.Released || r.CandidateRef != "" {
+		t.Fatalf("record = %+v", r)
+	}
+
+	fx.reader.Series["K1"] = core.Series{Ref: "K1", Title: "Never had it"}
+	fx.tr.SetLibrary([]core.LibraryEntry{entry("1", "Never had it", core.StatusPlanning, nil)})
+	fx.run(t)
+	if fx.dl.FindCallCount() != 0 || len(fx.dl.AcquiredCandidates()) != 0 {
+		t.Fatalf("find=%d acquired=%v; series is in the reader, want skip", fx.dl.FindCallCount(), fx.dl.AcquiredCandidates())
+	}
+}
+
+func TestRunStopsWhenContextCancelled(t *testing.T) {
+	fx := newFixture(t,
+		entry("1", "A", core.StatusPlanning, nil),
+		entry("2", "B", core.StatusPlanning, nil),
+	)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err := fx.s.Run(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if fx.dl.FindCallCount() != 0 {
+		t.Fatalf("find calls = %d, want 0", fx.dl.FindCallCount())
 	}
 }

@@ -208,7 +208,7 @@ Each poll: `ListLibrary(ACQUIRE_STATUSES ∪ RELEASE_STATUSES)`, `reader.ListAll
 1. Record is `acquired` → skip.
 2. Record is `not_found` and `retry_after` not reached → skip.
 3. `FindInLibrary` hit → store `acquired` (no download; you already have it).
-4. Present in the reader (see *Status lifecycle*) → skip, store nothing (re-checked each poll, cheap and local).
+4. Present in the reader (see *Status lifecycle*) → skip, store nothing (re-checked each poll, cheap and local), unless the record shows this series was managed in the downloader by us (`released`/`in_progress` with a candidate ref), since released files stay in the reader.
 5. `Find` → no match → store `not_found` with backoff 1d → 3d → 7d → 14d → 30d (cap); log up to 3 near misses.
 6. Match → `Acquire` → store `acquired` with candidate ref + source. On error store `in_progress`, retry next poll.
 

@@ -37,6 +37,9 @@ func (s *Syncer) SyncSeries(ctx context.Context, ref string) error {
 	}
 	var errs []error
 	for _, tr := range s.Trackers {
+		if ctx.Err() != nil {
+			return errors.Join(append(errs, ctx.Err())...)
+		}
 		if err := s.syncTracker(ctx, series, prog, tr); err != nil {
 			s.Log.Error("progress sync failed", "series", series.Title, "tracker", tr.Name(), "err", err)
 			errs = append(errs, fmt.Errorf("%s: %w", tr.Name(), err))
@@ -80,10 +83,36 @@ func (s *Syncer) syncTracker(ctx context.Context, series core.Series, prog core.
 	if err := tr.SaveEntry(ctx, id, *upd); err != nil {
 		return fmt.Errorf("save entry: %w", err)
 	}
+	status, progress := pushedState(cur, *upd, target.Unit)
 	return s.Store.PutMapping(ctx, store.SeriesMapping{
 		Reader: s.Reader.Name(), ReaderRef: series.Ref, Tracker: tr.Name(), TrackerID: id,
-		Status: store.Matched, LastAttempt: s.now(), LastStatus: target.Status, LastProgress: target.Progress,
+		Status: store.Matched, LastAttempt: s.now(), LastStatus: status, LastProgress: progress,
 	})
+}
+
+// pushedState is the tracker's status and progress (for unit) after applying upd to cur:
+// what was actually pushed, which can differ from the target when the tracker was already ahead.
+func pushedState(cur *core.Entry, upd core.EntryUpdate, unit core.Unit) (core.Status, *float64) {
+	var status core.Status
+	var progress *float64
+	if cur != nil {
+		status = cur.Status
+		progress = cur.Chapter
+		if unit == core.UnitVolume {
+			progress = cur.Volume
+		}
+	}
+	if upd.Status != nil {
+		status = *upd.Status
+	}
+	pushed := upd.Chapter
+	if unit == core.UnitVolume {
+		pushed = upd.Volume
+	}
+	if pushed != nil {
+		progress = pushed
+	}
+	return status, progress
 }
 
 // resolve returns the cached tracker ID, or resolves and caches it. Unmatched series are

@@ -1,6 +1,7 @@
 package progress
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -125,5 +126,42 @@ func TestDryRunWritesNothing(t *testing.T) {
 	}
 	if len(tr.SavedEntries()) != 0 {
 		t.Fatalf("dry run saved %v", tr.SavedEntries())
+	}
+}
+
+func TestMappingRecordsWhatWasPushed(t *testing.T) {
+	// The tracker already has chapter 200; only the status moves, so the pushed progress is 200.
+	hi := 200.0
+	tr := &coretest.FakeTracker{TrackerName: "mangabaka", IDsByRef: map[string]string{"S1": "1"},
+		Entries: map[string]*core.Entry{"1": {Status: core.StatusPlanning, Chapter: &hi}}}
+	st := newStore(t)
+	s := &Syncer{Reader: reader(core.ReadProgress{Unit: core.UnitChapter, BooksTotal: 300, BooksRead: 104, LastReadNumber: 104}),
+		Trackers: []core.Tracker{tr}, Store: st, Log: quietLog()}
+	if err := s.SyncSeries(t.Context(), "S1"); err != nil {
+		t.Fatal(err)
+	}
+	saved := tr.SavedEntries()
+	if len(saved) != 1 || saved[0].Update.Chapter != nil || *saved[0].Update.Status != core.StatusReading {
+		t.Fatalf("saved = %+v", saved)
+	}
+	m, _ := st.GetMapping(t.Context(), "komga", "S1", "mangabaka")
+	if m == nil || m.LastStatus != core.StatusReading || m.LastProgress == nil || *m.LastProgress != 200 {
+		t.Fatalf("mapping = %+v", m)
+	}
+}
+
+func TestSyncSeriesStopsWhenContextCancelled(t *testing.T) {
+	a := &coretest.FakeTracker{TrackerName: "a", IDsByRef: map[string]string{"S1": "x"}}
+	b := &coretest.FakeTracker{TrackerName: "b", IDsByRef: map[string]string{"S1": "y"}}
+	s := &Syncer{Reader: reader(core.ReadProgress{Unit: core.UnitChapter, BooksTotal: 10, BooksRead: 2, LastReadNumber: 2}),
+		Trackers: []core.Tracker{a, b}, Store: newStore(t), Log: quietLog()}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err := s.SyncSeries(ctx, "S1")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if a.ResolveCallCount()+b.ResolveCallCount() != 0 {
+		t.Fatal("no tracker should be touched after cancellation")
 	}
 }

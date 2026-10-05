@@ -23,6 +23,8 @@ func NotFoundBackoff(attempts int) time.Duration {
 	return notFoundBackoff[i]
 }
 
+// Syncer acquires and releases downloader manga according to the tracker library statuses.
+// A record in the store makes every pass idempotent; see the spec's "Download sync" section.
 type Syncer struct {
 	Reader     core.Reader
 	Tracker    core.Tracker
@@ -55,6 +57,9 @@ func (s *Syncer) Run(ctx context.Context) error {
 	}
 	var errs []error
 	for _, e := range entries {
+		if ctx.Err() != nil {
+			return errors.Join(append(errs, ctx.Err())...)
+		}
 		var err error
 		switch {
 		case slices.Contains(s.Acquire, e.Status):
@@ -63,7 +68,7 @@ func (s *Syncer) Run(ctx context.Context) error {
 			err = s.release(ctx, e)
 		}
 		if err != nil {
-			s.Log.Error("download sync failed", "series", e.Series.Title, "status", e.Status, "err", err)
+			s.logFor(e).Error("download sync failed", "err", err)
 			errs = append(errs, fmt.Errorf("%s: %w", e.Series.Title, err))
 		}
 	}
@@ -93,10 +98,16 @@ func (s *Syncer) acquire(ctx context.Context, e core.LibraryEntry, readerSeries 
 		log.Info("already in downloader library", "candidate", have.Title)
 		return s.save(ctx, e, store.Acquired, have, 0, time.Time{})
 	}
-	for _, rs := range readerSeries {
-		if match.SameSeries(rs, e.Series, s.Threshold) {
-			log.Debug("already in reader", "reader_series", rs.Title)
-			return nil
+	// Released files stay on disk and so in the reader. If our own record shows we managed
+	// this series in the downloader, the reader copy is ours and must not block re-acquiring.
+	managedByUs := rec != nil && rec.CandidateRef != "" &&
+		(rec.Status == store.Released || rec.Status == store.InProgress)
+	if !managedByUs {
+		for _, rs := range readerSeries {
+			if match.SameSeries(rs, e.Series, s.Threshold) {
+				log.Debug("already in reader", "reader_series", rs.Title)
+				return nil
+			}
 		}
 	}
 
@@ -114,7 +125,7 @@ func (s *Syncer) acquire(ctx context.Context, e core.LibraryEntry, readerSeries 
 		return s.save(ctx, e, store.NotFound, nil, attempts, retry)
 	}
 
-	log.Info("acquiring", "candidate", best.Title, "source", best.SourceName, "score", best.Score)
+	log.Info("acquiring", "candidate", best.Title, "candidate_ref", best.Ref, "source", best.SourceName, "score", best.Score)
 	if s.DryRun {
 		return nil
 	}
@@ -144,7 +155,7 @@ func (s *Syncer) release(ctx context.Context, e core.LibraryEntry) error {
 		log.Debug("not in downloader library; nothing to release")
 		return s.save(ctx, e, store.Released, nil, 0, time.Time{})
 	}
-	log.Info("releasing", "candidate", have.Title)
+	log.Info("releasing", "candidate", have.Title, "candidate_ref", have.Ref)
 	if s.DryRun {
 		return nil
 	}
