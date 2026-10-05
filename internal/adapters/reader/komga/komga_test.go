@@ -2,10 +2,12 @@ package komga
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -29,11 +31,15 @@ const seriesS3 = `{"id":"S3","libraryId":"L1","name":"Gone","deleted":true,"meta
 const progressS1 = `{"booksCount":244,"booksReadCount":104,"booksUnreadCount":139,"booksInProgressCount":1,
 "lastReadContinuousNumberSort":104.0,"maxNumberSort":232.0}`
 
+const progressUnread = `{"booksCount":10,"booksReadCount":0,"booksUnreadCount":10,"booksInProgressCount":0,
+"lastReadContinuousNumberSort":0.0,"maxNumberSort":10.0}`
+
 type server struct {
 	*httptest.Server
 	mu         sync.Mutex
 	listBodies []string
 	getHits    int
+	bookLists  []string // "<sort>|<body>" of every POST /api/v1/books/list
 }
 
 func newServer(t *testing.T) *server {
@@ -64,7 +70,52 @@ func newServer(t *testing.T) *server {
 		}
 	})
 	mux.HandleFunc("GET /api/v2/series/{id}/read-progress/tachiyomi", func(w http.ResponseWriter, r *http.Request) {
+		if r.PathValue("id") == "S4" {
+			io.WriteString(w, progressUnread)
+			return
+		}
 		io.WriteString(w, progressS1)
+	})
+	mux.HandleFunc("POST /api/v1/books/list", func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		sort := r.URL.Query().Get("sort")
+		s.mu.Lock()
+		s.bookLists = append(s.bookLists, sort+"|"+string(b))
+		s.mu.Unlock()
+		if r.URL.Query().Get("size") != "1" {
+			t.Errorf("books/list size = %q, want 1", r.URL.Query().Get("size"))
+		}
+		var body struct {
+			Condition struct {
+				AllOf []map[string]any `json:"allOf"`
+			} `json:"condition"`
+		}
+		if err := json.Unmarshal(b, &body); err != nil || len(body.Condition.AllOf) != 2 {
+			t.Errorf("books/list body = %s (%v)", b, err)
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		if sid, _ := body.Condition.AllOf[0]["seriesId"].(map[string]any); sid["operator"] != "is" || sid["value"] != "S1" {
+			t.Errorf("books/list seriesId condition = %v, want is S1", body.Condition.AllOf[0])
+		}
+		anyOf, _ := body.Condition.AllOf[1]["anyOf"].([]any)
+		var statuses []string
+		for _, c := range anyOf {
+			rs, _ := c.(map[string]any)["readStatus"].(map[string]any)
+			statuses = append(statuses, fmt.Sprint(rs["operator"], ":", rs["value"]))
+		}
+		if !slices.Equal(statuses, []string{"is:READ", "is:IN_PROGRESS"}) {
+			t.Errorf("books/list readStatus conditions = %v", statuses)
+		}
+		switch sort {
+		case "readProgress.readDate,asc":
+			io.WriteString(w, `{"content":[{"id":"B1","readProgress":{"page":10,"completed":true,"readDate":"2026-06-06T13:13:42Z"}}]}`)
+		case "readProgress.readDate,desc":
+			io.WriteString(w, `{"content":[{"id":"B9","readProgress":{"page":3,"completed":false,"readDate":"2026-09-01T08:00:00.123Z"}}]}`)
+		default:
+			t.Errorf("books/list sort = %q", sort)
+			http.Error(w, "bad sort", http.StatusBadRequest)
+		}
 	})
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-API-Key") != "secret" {
@@ -129,9 +180,20 @@ func TestGetProgress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := core.ReadProgress{Unit: core.UnitChapter, BooksTotal: 244, BooksRead: 104, BooksInProgress: 1, LastReadNumber: 104, MaxNumber: 232}
+	want := core.ReadProgress{Unit: core.UnitChapter, BooksTotal: 244, BooksRead: 104, BooksInProgress: 1, LastReadNumber: 104, MaxNumber: 232,
+		FirstReadAt: time.Date(2026, 6, 6, 13, 13, 42, 0, time.UTC), LastReadAt: time.Date(2026, 9, 1, 8, 0, 0, 123_000_000, time.UTC)}
+	if !p.FirstReadAt.Equal(want.FirstReadAt) || !p.LastReadAt.Equal(want.LastReadAt) {
+		t.Errorf("read dates = %v / %v, want %v / %v", p.FirstReadAt, p.LastReadAt, want.FirstReadAt, want.LastReadAt)
+	}
+	p.FirstReadAt, p.LastReadAt, want.FirstReadAt, want.LastReadAt = time.Time{}, time.Time{}, time.Time{}, time.Time{}
 	if p != want {
 		t.Errorf("progress = %+v, want %+v", p, want)
+	}
+	srv.mu.Lock()
+	lists := slices.Clone(srv.bookLists)
+	srv.mu.Unlock()
+	if len(lists) != 2 || !strings.HasPrefix(lists[0], "readProgress.readDate,asc|") || !strings.HasPrefix(lists[1], "readProgress.readDate,desc|") {
+		t.Errorf("books/list calls = %v, want one asc then one desc", lists)
 	}
 	srv.mu.Lock()
 	hits := srv.getHits
@@ -176,5 +238,21 @@ func TestListSkipsDeleted(t *testing.T) {
 				t.Errorf("%s: deleted series returned", name)
 			}
 		}
+	}
+}
+
+func TestGetProgressWithoutReadBooksSkipsDateLookups(t *testing.T) {
+	srv := newServer(t)
+	p, err := newClient(srv.URL).GetProgress(t.Context(), "S4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.BooksRead != 0 || p.BooksInProgress != 0 || !p.FirstReadAt.IsZero() || !p.LastReadAt.IsZero() {
+		t.Errorf("progress = %+v", p)
+	}
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if len(srv.bookLists) != 0 {
+		t.Errorf("books/list calls = %v, want none", srv.bookLists)
 	}
 }

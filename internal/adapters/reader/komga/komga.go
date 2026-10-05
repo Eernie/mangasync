@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
 	"mangasync/internal/core"
 	"mangasync/internal/httpx"
@@ -136,8 +137,47 @@ func (c *Client) GetProgress(ctx context.Context, ref string) (core.ReadProgress
 			unit = core.UnitVolume
 		}
 	}
-	return core.ReadProgress{
+	p := core.ReadProgress{
 		Unit: unit, BooksTotal: d.BooksCount, BooksRead: d.BooksReadCount, BooksInProgress: d.BooksInProgressCount,
 		LastReadNumber: d.LastReadContinuousNumberSort, MaxNumber: d.MaxNumberSort,
-	}, nil
+	}
+	if d.BooksReadCount+d.BooksInProgressCount > 0 {
+		var err error
+		if p.FirstReadAt, err = c.readDate(ctx, ref, "asc"); err != nil {
+			return core.ReadProgress{}, err
+		}
+		if p.LastReadAt, err = c.readDate(ctx, ref, "desc"); err != nil {
+			return core.ReadProgress{}, err
+		}
+	}
+	return p, nil
+}
+
+// readDate returns the readProgress.readDate of the first read or in-progress book of the series
+// in the given sort order ("asc" = earliest, "desc" = latest). Zero time if there is none or the
+// date cannot be parsed: dates are optional and must not block progress sync.
+func (c *Client) readDate(ctx context.Context, seriesRef, order string) (time.Time, error) {
+	body := map[string]any{"condition": map[string]any{"allOf": []any{
+		map[string]any{"seriesId": map[string]any{"operator": "is", "value": seriesRef}},
+		map[string]any{"anyOf": []any{readStatus("READ"), readStatus("IN_PROGRESS")}},
+	}}}
+	var page struct {
+		Content []struct {
+			ReadProgress struct {
+				ReadDate string `json:"readDate"`
+			} `json:"readProgress"`
+		} `json:"content"`
+	}
+	endpoint := c.cfg.URL + "/api/v1/books/list?size=1&sort=readProgress.readDate," + order
+	if err := c.api.DoJSON(ctx, http.MethodPost, endpoint, c.header(), body, &page); err != nil {
+		return time.Time{}, err
+	}
+	if len(page.Content) == 0 {
+		return time.Time{}, nil
+	}
+	ts, err := time.Parse(time.RFC3339, page.Content[0].ReadProgress.ReadDate)
+	if err != nil {
+		return time.Time{}, nil
+	}
+	return ts, nil
 }
