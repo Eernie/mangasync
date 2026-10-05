@@ -1,14 +1,14 @@
 # MangaSync — Design
 
 Date: 2026-10-05
-Status: Approved for planning (rev 3: validated against live Komga/Suwayomi/MangaBaka on 2026-10-05)
+Status: Approved for planning (rev 4: status lifecycle + download sync)
 
 ## Goal
 
 A small always-on service on Kubernetes that connects three kinds of services through swappable adapters:
 
 1. **Read sync:** pushes read history from a **Reader** (Komga) to one or more **Trackers** (MangaBaka) — status + progress, one-way.
-2. **WTR → download:** when a series is marked "plan to read" in a designated Tracker, finds it with a **Downloader** (Suwayomi), adds it to the downloader's library and downloads all chapters.
+2. **Download sync:** reacts to the status of each series in a designated Tracker. Want-to-read and reading series that you don't have yet are found with a **Downloader** (Suwayomi), added to its library and fully downloaded; dropped series are removed from the downloader's library (files kept). See *Status lifecycle*.
 
 v1 ships exactly one adapter per port: `komga`, `mangabaka`, `suwayomi`. The ports are shaped so that Kavita (reader), AniList / MyAnimeList (trackers) and other downloaders can be added later as new adapter packages without changing the sync logic.
 
@@ -19,13 +19,13 @@ Non-goals (v1): two-way sync (Tracker → Reader), syncing ratings/notes/dates, 
 ```
               ┌──────────────── core (types + ports) ────────────────┐
  Reader ──▶   │  sync/progress  ──▶  Tracker(s)                      │
- (komga)      │  sync/wtr       ◀──  WTR Tracker  ──▶  Downloader    │
+ (komga)      │  sync/download  ◀──  Tracker      ──▶  Downloader    │
               └──────────────────────────────────────────────────────┘
                      ▲ match (pure)        ▲ store (SQLite)
 ```
 
 - `internal/core` holds provider-neutral types and port interfaces. It imports nothing from the project.
-- `internal/sync/progress` and `internal/sync/wtr` contain all business rules and depend only on `core`, `match` and `store`.
+- `internal/sync/progress` and `internal/sync/download` contain all business rules and depend only on `core`, `match` and `store`.
 - Each adapter lives in `internal/adapters/<port>/<name>` and implements a port. Adapters never import each other or the sync packages.
 - `internal/adapters/registry` maps adapter names to constructors that read their own env vars. Adding an adapter = new package + one registry line.
 
@@ -48,14 +48,15 @@ type Series struct {
 type Unit string // "chapter" | "volume"
 
 type ReadProgress struct {
-    Unit           Unit
-    BooksTotal     int
-    BooksRead      int
+    Unit            Unit
+    BooksTotal      int
+    BooksRead       int
+    BooksInProgress int     // partially read books
     LastReadNumber float64 // last continuously-read chapter/volume number
     MaxNumber      float64 // highest chapter/volume number present
 }
 
-type Status string // "planning" | "reading" | "completed" | "paused" | "dropped" | "rereading" | "unknown"
+type Status string // "considering" | "planning" | "reading" | "completed" | "paused" | "dropped" | "rereading" | "unknown"
 
 type Entry struct {
     Status  Status
@@ -76,6 +77,7 @@ type EntryUpdate struct { // nil fields are left unchanged
 type Reader interface {
     Name() string
     ListStartedSeries(ctx context.Context) ([]Series, error) // series with any read progress
+    ListAllSeries(ctx context.Context) ([]Series, error)     // every series, with IDs; used for "already have it"
     GetSeries(ctx context.Context, ref string) (Series, error)
     GetProgress(ctx context.Context, ref string) (ReadProgress, error)
 }
@@ -97,9 +99,14 @@ type Tracker interface {
     SaveEntry(ctx context.Context, id string, u EntryUpdate) error // create or partial update
 }
 
-// Optional Tracker capability, required for the tracker named in WTR_TRACKER.
-type PlanningLister interface {
-    ListPlanning(ctx context.Context) ([]Series, error) // Ref = tracker ID, with titles + IDs filled
+type LibraryEntry struct {
+    Series Series // Ref = tracker ID, with titles + IDs filled
+    Status Status
+}
+
+// Optional Tracker capability, required for the tracker named in DOWNLOAD_TRACKER.
+type LibraryLister interface {
+    ListLibrary(ctx context.Context, statuses []Status) ([]LibraryEntry, error)
 }
 
 type Candidate struct {
@@ -111,16 +118,54 @@ type Candidate struct {
 
 type Downloader interface {
     Name() string
+    // FindInLibrary matches s against the downloader's own library only (no source searches).
+    FindInLibrary(ctx context.Context, s Series) (*Candidate, error)
     // Find searches the downloader for s. best is nil when nothing passes the threshold;
     // nearMisses are the closest rejected candidates, for logging.
     Find(ctx context.Context, s Series) (best *Candidate, nearMisses []Candidate, err error)
     // Acquire adds the candidate to the downloader's library and queues every
     // not-yet-downloaded chapter. Must be idempotent.
     Acquire(ctx context.Context, c Candidate) error
+    // Release removes the manga from the downloader's library so it stops updating.
+    // Downloaded files are kept. Must be idempotent.
+    Release(ctx context.Context, c Candidate) error
 }
 ```
 
-Status mapping lives in each tracker adapter (e.g. MangaBaka `plan_to_read`/`considering` → `planning`; AniList `CURRENT` → `reading`, `REPEATING` → `rereading`; MAL `on_hold` → `paused`). Values an adapter doesn't recognize map to `unknown`.
+Status mapping lives in each tracker adapter (e.g. MangaBaka `plan_to_read` → `planning`, `considering` → `considering`; AniList `CURRENT` → `reading`, `REPEATING` → `rereading`; MAL `on_hold` → `paused`). Values an adapter doesn't recognize map to `unknown`.
+
+## Status lifecycle
+
+Normalized statuses, what sets them, and what the downloader does (defaults):
+
+| Status (MangaBaka) | Set from the reader? | Overwritten from the reader? | Downloader action |
+|---|---|---|---|
+| `considering` | Never | Yes → `reading`/`completed` once reading starts | None |
+| `planning` (`plan_to_read`) | Never | Yes → `reading`/`completed` once reading starts | **Acquire** (if not already had) |
+| `reading` | `IN_PROGRESS`, or all read while still publishing | Progress only goes up; → `completed` when finished | **Acquire** (if not already had) |
+| `rereading` | Never | Never (protected) | **Acquire** (if not already had) |
+| `completed` | All read and publication ended | Never (protected) | None |
+| `paused` | Never | Never (protected) | None |
+| `dropped` | Never | Never (protected) | **Release** (remove from library, keep files) |
+| not in list | Created as `reading`/`completed` once the reader shows progress | — | None |
+
+Reader → tracker:
+
+| Reader state | Tracker status | Progress |
+|---|---|---|
+| nothing read or opened | no action | — |
+| first book(s) only partly read (`BooksRead == 0`, `BooksInProgress > 0`) | `reading` | none |
+| some books read | `reading` | `LastReadNumber` |
+| all read, still publishing | `reading` | `MaxNumber` |
+| all read, publication ended | `completed` | `MaxNumber` |
+
+Typical flow: mark WTR → acquired and downloaded → appears in Komga → reading sets `reading` (downloader: already had, no-op) → finishing sets `completed` (or stays `reading` while ongoing). Manually setting `dropped` releases it; setting it back to WTR/reading acquires it again.
+
+"Already had" means either of:
+- found in the downloader's library (`FindInLibrary`), or
+- present in the reader: a reader series (`ListAllSeries`, fetched once per poll) shares any cross-reference ID with the tracker series, or matches its titles at ≥ `MATCH_THRESHOLD`. This prevents duplicate downloads of series added to Komga outside Suwayomi.
+
+The acquire/release status sets are configurable (`ACQUIRE_STATUSES`, `RELEASE_STATUSES`).
 
 ## Runtime
 
@@ -128,7 +173,7 @@ Single Go binary, Kubernetes Deployment (1 replica), three loops:
 
 1. **Watcher** — only if the reader implements `ProgressWatcher`. Each emitted series ref is debounced (`SSE_DEBOUNCE`, default 10s) then queued for progress sync. On channel close: reconnect with backoff (1s → 60s cap).
 2. **Reconcile** (`RECONCILE_INTERVAL`, default 1h, plus once at startup) — queues every series from `ListStartedSeries`.
-3. **WTR poller** (`WTR_INTERVAL`, default 15m, plus once at startup) — only if `WTR_TRACKER` and `DOWNLOADER` are set.
+3. **Download sync** (`DOWNLOAD_INTERVAL`, default 15m, plus once at startup) — only if `DOWNLOAD_TRACKER` and `DOWNLOADER` are set.
 
 Progress sync runs on one worker goroutine fed by a deduplicating queue, so watcher and reconcile never sync the same series concurrently.
 
@@ -137,32 +182,41 @@ Progress sync runs on one worker goroutine fed by a deduplicating queue, so watc
 For one reader series, for each tracker in `TRACKERS` (failures in one tracker don't affect the others):
 
 1. **Resolve** the tracker ID: cached in store → else `tracker.Resolve(series)`. Not found → store `unmatched`, retry at most once per 24h.
-2. **Target** from `ReadProgress`:
+2. **Target** from `ReadProgress` (see the reader → tracker table in *Status lifecycle*):
    - `BooksRead == BooksTotal > 0` and `tracker.SeriesEnded` → `completed`, progress = `MaxNumber`.
    - `BooksRead == BooksTotal > 0`, series still publishing → `reading`, progress = `MaxNumber` (caught up).
    - `BooksRead > 0` → `reading`, progress = `LastReadNumber`.
+   - `BooksRead == 0`, `BooksInProgress > 0` → `reading`, no progress.
    - Publication status comes from the tracker, not the reader: Komga's `metadata.status` defaults to `ONGOING` for series without metadata (seen live on finished series), so it can't be trusted.
    - `BooksTotal` can exceed `MaxNumber` (duplicate scanlations, chapter 0), so "all read" uses the book counts and progress uses the numbers.
    - else → no action.
    - Progress goes in `Chapter` or `Volume` per `ReadProgress.Unit`.
 3. **Decide** against the current entry (`GetEntry`):
    - Protected: if current status is `paused`, `dropped`, `completed`, `rereading` or `unknown` → do nothing.
-   - Status may move: none/`planning` → `reading`/`completed`; `reading` → `completed`. Never backwards.
+   - Status may move: none/`considering`/`planning` → `reading`/`completed`; `reading` → `completed`. Never backwards.
    - Never lower progress: only send progress if target > current (or current is nil).
    - Nothing to change → no write.
 4. **Write** with `SaveEntry` (only changed fields). Record last pushed status/progress in store.
 
 The decision function (step 3) is a pure function `Decide(current *Entry, target Target) *EntryUpdate`, independent of any adapter.
 
-## WTR flow (WTR Tracker → Downloader)
+## Download sync (Tracker → Downloader)
 
-For each series from `ListPlanning` that isn't `done` and isn't in `not_found` backoff:
+Each poll: `ListLibrary(ACQUIRE_STATUSES ∪ RELEASE_STATUSES)`, `reader.ListAllSeries()` once, then per entry, using the `downloads` record for (tracker, tracker_id, downloader):
 
-1. `downloader.Find(series)`.
-2. `best == nil` → store `not_found` with `retry_after` backoff 1d → 3d → 7d → 14d → 30d (cap); log up to 3 near misses.
-3. Otherwise `downloader.Acquire(best)` → store `done` with candidate ref + source. On error store `in_progress` and retry next poll (Acquire is idempotent).
+**Status in `ACQUIRE_STATUSES`:**
+1. Record is `acquired` → skip.
+2. Record is `not_found` and `retry_after` not reached → skip.
+3. `FindInLibrary` hit → store `acquired` (no download; you already have it).
+4. Present in the reader (see *Status lifecycle*) → skip, store nothing (re-checked each poll, cheap and local).
+5. `Find` → no match → store `not_found` with backoff 1d → 3d → 7d → 14d → 30d (cap); log up to 3 near misses.
+6. Match → `Acquire` → store `acquired` with candidate ref + source. On error store `in_progress`, retry next poll.
 
-Series that leave planning are ignored; `done` records stay.
+**Status in `RELEASE_STATUSES`:**
+1. Record is `released` → skip.
+2. `FindInLibrary` hit → `Release` → store `released`. Miss → store `released` (nothing to remove).
+
+Any other status → nothing. A record flips between `acquired` and `released` as the tracker status changes, so dropped → WTR acquires again, and WTR → dropped releases.
 
 ## Matching (`internal/match`, shared by adapters)
 
@@ -174,7 +228,7 @@ Series that leave planning are ignored; `done` records stay.
 ## State (SQLite at `DB_PATH`)
 
 - `series_map(reader, reader_ref, tracker, tracker_id NULL, status [matched|unmatched], last_attempt, last_status, last_progress, PK(reader, reader_ref, tracker))`
-- `wtr(tracker, tracker_id, downloader, status [done|not_found|in_progress], candidate_ref NULL, source NULL, attempts, retry_after, updated_at, PK(tracker, tracker_id, downloader))`
+- `downloads(tracker, tracker_id, downloader, status [acquired|released|not_found|in_progress], candidate_ref NULL, source NULL, attempts, retry_after, updated_at, PK(tracker, tracker_id, downloader))`
 
 Keys include the adapter names, so switching or adding adapters never collides with old rows. Losing the DB is safe: everything is re-derivable.
 
@@ -182,8 +236,8 @@ Keys include the adapter names, so switching or adding adapters never collides w
 
 - Shared `internal/httpx`: client with per-adapter rate limiter and retries on 429/5xx/network errors (exponential backoff + jitter, honors `Retry-After`, max 5 attempts). Every adapter uses it.
 - One series/tracker failing is logged and skipped.
-- Config errors (unknown adapter name, missing env, unknown Suwayomi source, `WTR_TRACKER` not in a tracker that implements `PlanningLister`) → fail fast at startup.
-- `DRY_RUN=true`: sync logic computes everything, logs intended `SaveEntry`/`Acquire` calls with payloads, and skips them. Store records nothing as `done`. Implemented once in the sync layer, not per adapter.
+- Config errors (unknown adapter name, missing env, unknown Suwayomi source, `DOWNLOAD_TRACKER` not a tracker that implements `LibraryLister`, unknown status names in `ACQUIRE_STATUSES`/`RELEASE_STATUSES`, a status in both sets) → fail fast at startup.
+- `DRY_RUN=true`: sync logic computes everything, logs intended `SaveEntry`/`Acquire`/`Release` calls with payloads, and skips them. Store records nothing as `acquired`/`released`. Implemented once in the sync layer, not per adapter.
 
 ## Configuration
 
@@ -193,9 +247,11 @@ Core:
 |---|---|---|
 | `READER` | `komga` | adapter name |
 | `TRACKERS` | `mangabaka` | comma-separated adapter names |
-| `WTR_TRACKER` | empty | tracker to read planning list from; empty disables WTR |
-| `DOWNLOADER` | empty | adapter name; empty disables WTR |
-| `WTR_INTERVAL` | `15m` | |
+| `DOWNLOAD_TRACKER` | empty | tracker whose statuses drive the downloader; empty disables download sync |
+| `DOWNLOADER` | empty | adapter name; empty disables download sync |
+| `ACQUIRE_STATUSES` | `planning,reading,rereading` | empty disables acquiring |
+| `RELEASE_STATUSES` | `dropped` | empty disables releasing |
+| `DOWNLOAD_INTERVAL` | `15m` | |
 | `RECONCILE_INTERVAL` | `1h` | |
 | `SSE_DEBOUNCE` | `10s` | |
 | `MATCH_THRESHOLD` | `0.9` | |
@@ -214,11 +270,12 @@ Env: `KOMGA_URL`, `KOMGA_API_KEY`, `KOMGA_VOLUME_LIBRARIES` (comma-separated lib
 
 - Auth header `X-API-Key`.
 - `ListStartedSeries`: `POST /api/v1/series/list?unpaged=true` with condition `anyOf readStatus is IN_PROGRESS / READ`.
+- `ListAllSeries`: same endpoint with `{}`; the list response already includes `metadata.title`, `alternateTitles` and `links`, so no per-series calls.
 - `GetSeries`: `GET /api/v1/series/{id}` → `metadata.title`, `metadata.alternateTitles`, `libraryId`; `IDs` from `metadata.links[].url` via `match.ParseLink`. Parse by URL, not label: live labels are `AniList`, `MangaUpdates`, `MyAnimeList`, `Kitsu`, `Anime-Planet`, `MangaDex`, plus shop/official links to ignore. No `MangaBaka` links exist on the live instance, and 16 of 28 series have no links at all, so title search is a primary path, not an edge case.
-- `GetProgress`: `GET /api/v2/series/{id}/read-progress/tachiyomi` → `lastReadContinuousNumberSort`, `maxNumberSort`, `booksCount`, `booksReadCount`. Unit = volume if library in `KOMGA_VOLUME_LIBRARIES`, else chapter.
+- `GetProgress`: `GET /api/v2/series/{id}/read-progress/tachiyomi` → `lastReadContinuousNumberSort`, `maxNumberSort`, `booksCount`, `booksReadCount`, `booksInProgressCount`. Unit = volume if library in `KOMGA_VOLUME_LIBRARIES`, else chapter.
 - `WatchProgress`: SSE `GET /sse/v1/events` with `X-API-Key` (verified: 200, `text/event-stream`). Format is `event:<Type>\ndata:<json>\n\n`; ignore other types (e.g. `TaskQueueStatus`). Emit `seriesId` from `ReadProgressSeriesChanged` / `ReadProgressSeriesDeleted`. Events are delivered only to the owning user, so the API key must belong to the reading user.
 
-### Tracker `mangabaka` (implements `Tracker`, `PlanningLister`)
+### Tracker `mangabaka` (implements `Tracker`, `LibraryLister`)
 
 Env: `MANGABAKA_TOKEN` (Personal Access Token, `mb-…`).
 
@@ -226,9 +283,9 @@ Env: `MANGABAKA_TOKEN` (Personal Access Token, `mb-…`).
 - `Resolve`: `IDs["mangabaka"]` → done; else first of anilist / mangaupdates / mal / kitsu / animeplanet → `GET /v1/source/{anilist|manga-updates|my-anime-list|kitsu|anime-planet}/{id}` (verified: returns `data.series[]`, take the first `active` one); else `GET /v1/series/search?q=` + `match.Best` against `title`, `romanized_title` and `secondary_titles.*[].title`. Search returns near-duplicates (e.g. two Sasuke's Story entries), so `Best` must pick the highest score, not the first hit. Follow `merged_with` on merged series.
 - `SeriesEnded`: `GET /v1/series/{id}` → `status` in {`completed`, `cancelled`}. Enum: `cancelled, completed, hiatus, releasing, unknown, upcoming`. Cached in memory for the reconcile interval.
 - `GetEntry`: `GET /v1/my/library/{id}` (404 → nil). `SaveEntry`: `PATCH` (or `POST` if absent) with `state`, `progress_chapter`, `progress_volume`.
-- `ListPlanning`: `GET /v2/my/library?state=plan_to_read&limit=100` (paged). Must be v2: v1 list items carry no series ID. v2 items are `{entry, lists, series}` with the full series object (`id`, titles, `secondary_titles`, `source`).
+- `ListLibrary`: `GET /v2/my/library?state=<s>&limit=100` (paged), once per requested MangaBaka state (or unfiltered and filtered locally if the API rejects repeated `state`). Must be v2: v1 list items carry no series ID. v2 items are `{entry, lists, series}` with the full series object (`id`, titles, `secondary_titles`, `source`).
 - Progress fields are JSON numbers with no `multipleOf` in the spec, so decimals (e.g. 10.5) are sent as-is. A submitted `0` is stored as null.
-- Status map: `plan_to_read`, `considering` → planning; `reading` → reading; `completed` → completed; `paused`, `on_hold` → paused; `dropped` → dropped; `rereading` → rereading; else unknown. Reverse: planning → `plan_to_read`.
+- Status map: `considering` → considering; `plan_to_read` → planning; `reading` → reading; `completed` → completed; `paused`, `on_hold` → paused; `dropped` → dropped; `rereading` → rereading; else unknown. Reverse is the same table (only `reading`/`completed` are ever written).
 - Rate limits: search 25/min, others 150/min (API limits are 30 / 180 per IP).
 
 ### Downloader `suwayomi` (implements `Downloader`)
@@ -238,12 +295,14 @@ Env: `SUWAYOMI_URL`, `SUWAYOMI_AUTH` (`none` | `basic` | `ui_login`), `SUWAYOMI_
 - GraphQL at `/api/graphql`, typed structs over `net/http`. `ui_login`: `login` mutation → Bearer access token (~5 min), refreshed via `refreshToken` mutation.
 - Startup: resolve `SUWAYOMI_SOURCES` names → IDs via `sources` query; fail on unknown names.
 - `Find`: for each source in order, `fetchSourceManga(type: SEARCH, query: title, page: 1)`; score with `match.Best` against title + all alt titles; first source with an accepted candidate wins. If nothing matches on the main title, repeat once with the first English alt title. Alt titles are essential: sources use English titles (Weeb Central returns `Frieren - Beyond Journey's End`) while MangaBaka's main title may be romaji.
+- `FindInLibrary`: `mangas(condition:{inLibrary:true})` (cached per poll) scored with `match.Best` against title + alt titles.
 - `Acquire`: `updateManga(patch:{inLibrary:true})` if not in library → `fetchChapters` → `enqueueChapterDownloads` for chapters with `isDownloaded == false`.
+- `Release`: `updateManga(patch:{inLibrary:false})`. Chapters and files on disk are untouched.
 - Live instance: v2.4.2378 (Preview), auth `none`, installed sources `Weeb Central (EN)`, `ManhuaTop (EN)`, `Webdex Scans (EN)`. The existing 28-series library all comes from Weeb Central.
 
 ## Future adapters (shape check only, not built in v1)
 
-Expected shapes, to confirm when built: Kavita (REST + JWT/API key, SignalR hub for live events → `ProgressWatcher`), AniList (GraphQL, OAuth token, `MediaList` status/progress/progressVolumes, IDs via `idMal`), MyAnimeList (REST v2, OAuth2 PKCE, `num_chapters_read`/`num_volumes_read`). None of them require changes to the ports above.
+Expected shapes, to confirm when built: Kavita (REST + JWT/API key, SignalR hub for live events → `ProgressWatcher`), AniList (GraphQL, OAuth token, `MediaList` status/progress/progressVolumes, IDs via `idMal`), MyAnimeList (REST v2, OAuth2 PKCE, `num_chapters_read`/`num_volumes_read`). None of them require changes to the ports above (AniList/MAL have no `considering`; they simply never produce it).
 
 ## Package layout
 
@@ -254,7 +313,7 @@ Expected shapes, to confirm when built: Kavita (REST + JWT/API key, SignalR hub 
 | `internal/core/coretest` | Reusable contract tests + in-memory fake adapters |
 | `internal/match` | Normalization, similarity, link parsing |
 | `internal/sync/progress` | Resolve → target → `Decide` → write |
-| `internal/sync/wtr` | Planning → Find → Acquire with backoff |
+| `internal/sync/download` | Tracker status → acquire/release, with "already had" checks and backoff |
 | `internal/store` | SQLite (`modernc.org/sqlite`, no CGO) |
 | `internal/httpx` | Shared HTTP client: rate limit + retry |
 | `internal/adapters/registry` | Name → constructor |
@@ -270,8 +329,8 @@ Expected shapes, to confirm when built: Kavita (REST + JWT/API key, SignalR hub 
 
 ## Testing
 
-- **Pure units** (table-driven): `match`, `progress.Decide`, WTR backoff schedule.
-- **Sync logic** with in-memory fakes from `coretest`: multi-tracker fan-out with one tracker failing, protected statuses, never-lower progress, WTR idempotent re-run, partial failure, not-found backoff, dry run.
+- **Pure units** (table-driven): `match`, `progress.Decide` (every row of both lifecycle tables), not-found backoff schedule.
+- **Sync logic** with in-memory fakes from `coretest`: multi-tracker fan-out with one tracker failing, protected statuses, never-lower progress; download sync for every status, already-in-downloader, already-in-reader (by ID and by title), dropped → release → back to WTR → re-acquire, idempotent re-run, partial failure, dry run.
 - **Adapter tests**: `httptest` servers with JSON fixtures shaped like real responses; each adapter also runs the `coretest` contract suite for its port, which future adapters reuse.
 - **Manual smoke**: `DRY_RUN=true` against the real instances before enabling writes.
 
