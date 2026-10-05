@@ -26,6 +26,12 @@ func TestParseLink(t *testing.T) {
 		{"https://www.amazon.co.jp/dp/B07MX551PW", "", "", false},
 		{"https://anilist.co/user/someone", "", "", false},
 		{"not a url", "", "", false},
+		{"https://anilist.co:443/manga/1", core.IDAniList, "1", true},
+		{"https://kitsu.app/manga/chainsaw-man", "", "", false},
+		{"https://anilist.co/manga/abc", "", "", false},
+		{"https://myanimelist.net/manga/12x", "", "", false},
+		{"https://mangabaka.org/manga/chainsaw-man", "", "", false},
+		{"https://www.animenewsnetwork.com/encyclopedia/manga.php?id=abc", "", "", false},
 	}
 	for _, c := range cases {
 		kind, id, ok := ParseLink(c.url)
