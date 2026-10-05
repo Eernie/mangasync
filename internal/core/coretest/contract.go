@@ -16,19 +16,12 @@ func containsRef(ss []core.Series, ref string) bool {
 	return false
 }
 
-// ReaderContract checks invariants every Reader adapter must hold. ref must be a started series.
+// ReaderContract checks invariants every Reader adapter must hold. ref must be a series with read progress.
 func ReaderContract(t *testing.T, r core.Reader, ref string) {
 	t.Helper()
 	ctx := context.Background()
 	if r.Name() == "" {
 		t.Error("Name() is empty")
-	}
-	started, err := r.ListStartedSeries(ctx)
-	if err != nil {
-		t.Fatalf("ListStartedSeries: %v", err)
-	}
-	if !containsRef(started, ref) {
-		t.Errorf("ListStartedSeries does not contain %q", ref)
 	}
 	all, err := r.ListAllSeries(ctx)
 	if err != nil {

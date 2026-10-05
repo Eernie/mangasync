@@ -12,7 +12,6 @@ func TestFakesSatisfyContracts(t *testing.T) {
 		ReaderName: "fake-reader",
 		Series:     map[string]core.Series{"S1": series},
 		Progress:   map[string]core.ReadProgress{"S1": {Unit: core.UnitChapter, BooksTotal: 10, BooksRead: 3}},
-		Started:    []string{"S1"},
 	}
 	ReaderContract(t, r, "S1")
 

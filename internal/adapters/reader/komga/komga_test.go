@@ -1,7 +1,6 @@
 package komga
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -143,22 +142,15 @@ func TestContract(t *testing.T) {
 	coretest.ReaderContract(t, newClient(srv.URL), "S1")
 }
 
-func TestListBodies(t *testing.T) {
+func TestListAllSeriesBody(t *testing.T) {
 	srv := newServer(t)
-	c := newClient(srv.URL)
-	if _, err := c.ListStartedSeries(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c.ListAllSeries(t.Context()); err != nil {
+	if _, err := newClient(srv.URL).ListAllSeries(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
-	if !strings.Contains(srv.listBodies[0], `"IN_PROGRESS"`) || !strings.Contains(srv.listBodies[0], `"READ"`) {
-		t.Errorf("started body = %s", srv.listBodies[0])
-	}
-	if srv.listBodies[1] != `{}` {
-		t.Errorf("all body = %s", srv.listBodies[1])
+	if len(srv.listBodies) != 1 || srv.listBodies[0] != `{}` {
+		t.Errorf("list bodies = %q, want one `{}`", srv.listBodies)
 	}
 }
 
@@ -229,20 +221,16 @@ func TestBadKey(t *testing.T) {
 
 func TestListSkipsDeleted(t *testing.T) {
 	c := newClient(newServer(t).URL)
-	for name, fn := range map[string]func(context.Context) ([]core.Series, error){
-		"started": c.ListStartedSeries, "all": c.ListAllSeries,
-	} {
-		got, err := fn(t.Context())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(got) != 2 {
-			t.Errorf("%s: got %d series, want 2 (S3 is deleted)", name, len(got))
-		}
-		for _, s := range got {
-			if s.Ref == "S3" {
-				t.Errorf("%s: deleted series returned", name)
-			}
+	got, err := c.ListAllSeries(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Errorf("got %d series, want 2 (S3 is deleted)", len(got))
+	}
+	for _, s := range got {
+		if s.Ref == "S3" {
+			t.Error("deleted series returned")
 		}
 	}
 }

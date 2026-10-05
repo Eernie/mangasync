@@ -97,12 +97,6 @@ func readStatus(v string) map[string]any {
 	return map[string]any{"readStatus": map[string]any{"operator": "is", "value": v}}
 }
 
-func (c *Client) ListStartedSeries(ctx context.Context) ([]core.Series, error) {
-	return c.list(ctx, map[string]any{"condition": map[string]any{
-		"anyOf": []any{readStatus("IN_PROGRESS"), readStatus("READ")},
-	}})
-}
-
 func (c *Client) ListAllSeries(ctx context.Context) ([]core.Series, error) {
 	return c.list(ctx, map[string]any{})
 }

@@ -31,7 +31,6 @@ func reader(p core.ReadProgress) *coretest.FakeReader {
 		ReaderName: "komga",
 		Series:     map[string]core.Series{"S1": {Ref: "S1", Title: "Chainsaw Man"}},
 		Progress:   map[string]core.ReadProgress{"S1": p},
-		Started:    []string{"S1"},
 	}
 }
 

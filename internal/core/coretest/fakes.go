@@ -22,18 +22,9 @@ type FakeReader struct {
 	ReaderName string
 	Series     map[string]core.Series
 	Progress   map[string]core.ReadProgress
-	Started    []string // refs returned by ListStartedSeries
 }
 
 func (f *FakeReader) Name() string { return f.ReaderName }
-
-func (f *FakeReader) ListStartedSeries(context.Context) ([]core.Series, error) {
-	var out []core.Series
-	for _, ref := range f.Started {
-		out = append(out, f.Series[ref])
-	}
-	return out, nil
-}
 
 func (f *FakeReader) ListAllSeries(context.Context) ([]core.Series, error) {
 	out := make([]core.Series, 0, len(f.Series))

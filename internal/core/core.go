@@ -105,8 +105,7 @@ type Candidate struct {
 // Reader is a service where the user reads manga, e.g. Komga.
 type Reader interface {
 	Name() string
-	ListStartedSeries(ctx context.Context) ([]Series, error) // series with any read progress
-	ListAllSeries(ctx context.Context) ([]Series, error)     // every series, with IDs
+	ListAllSeries(ctx context.Context) ([]Series, error) // every series, with IDs
 	GetSeries(ctx context.Context, ref string) (Series, error)
 	GetProgress(ctx context.Context, ref string) (ReadProgress, error)
 }
