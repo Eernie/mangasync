@@ -90,6 +90,12 @@ func (s *Syncer) acquire(ctx context.Context, e core.LibraryEntry, readerSeries 
 		}
 	}
 
+	// An interrupted acquire may already have put the manga in the downloader library, so
+	// FindInLibrary would wrongly report it as done. Resume the acquire instead.
+	if rec != nil && rec.Status == store.InProgress && rec.CandidateRef != "" {
+		return s.acquireCandidate(ctx, e, core.Candidate{Ref: rec.CandidateRef, SourceName: rec.Source}, "resuming acquire")
+	}
+
 	have, err := s.Downloader.FindInLibrary(ctx, e.Series)
 	if err != nil {
 		return fmt.Errorf("find in downloader library: %w", err)
@@ -129,17 +135,23 @@ func (s *Syncer) acquire(ctx context.Context, e core.LibraryEntry, readerSeries 
 		return s.save(ctx, e, store.NotFound, prev, attempts, retry)
 	}
 
-	log.Info("acquiring", "candidate", best.Title, "candidate_ref", best.Ref, "source", best.SourceName, "score", best.Score)
+	return s.acquireCandidate(ctx, e, *best, "acquiring")
+}
+
+// acquireCandidate acquires c and records the result: acquired on success, in_progress on
+// failure so the next pass resumes. In dry-run mode it only logs.
+func (s *Syncer) acquireCandidate(ctx context.Context, e core.LibraryEntry, c core.Candidate, msg string) error {
+	s.logFor(e).Info(msg, "candidate", c.Title, "candidate_ref", c.Ref, "source", c.SourceName, "score", c.Score)
 	if s.DryRun {
 		return nil
 	}
-	if err := s.Downloader.Acquire(ctx, *best); err != nil {
-		if serr := s.save(ctx, e, store.InProgress, best, 0, time.Time{}); serr != nil {
+	if err := s.Downloader.Acquire(ctx, c); err != nil {
+		if serr := s.save(ctx, e, store.InProgress, &c, 0, time.Time{}); serr != nil {
 			err = errors.Join(err, serr)
 		}
 		return fmt.Errorf("acquire: %w", err)
 	}
-	return s.save(ctx, e, store.Acquired, best, 0, time.Time{})
+	return s.save(ctx, e, store.Acquired, &c, 0, time.Time{})
 }
 
 func (s *Syncer) release(ctx context.Context, e core.LibraryEntry) error {

@@ -316,3 +316,50 @@ func TestManagedMarkerSurvivesNotFoundRetries(t *testing.T) {
 		t.Fatalf("expected acquire after backoff; acquired=%v", fx.dl.AcquiredCandidates())
 	}
 }
+
+func TestInProgressIsResumedEvenThoughManagaIsNowInDownloaderLibrary(t *testing.T) {
+	fx := newFixture(t, entry("1", "Frieren", core.StatusPlanning, nil))
+	cand := core.Candidate{Ref: "130", Title: "Frieren", SourceName: "Src"}
+	fx.dl.Search["1"] = cand
+	fx.dl.SetAcquireErr(errors.New("chapter fetch failed"))
+	if err := fx.s.Run(t.Context()); err == nil {
+		t.Fatal("expected error")
+	}
+	if r := fx.record(t, "1"); r.Status != store.InProgress || r.CandidateRef != "130" {
+		t.Fatalf("record = %+v", r)
+	}
+
+	// The failed Acquire had already added it to the downloader library.
+	fx.dl.SetLibrary(map[string]core.Candidate{"1": cand})
+	fx.dl.SetAcquireErr(nil)
+	fx.run(t)
+
+	got := fx.dl.AcquiredCandidates()
+	if len(got) != 1 || got[0].Ref != "130" || got[0].SourceName != "Src" {
+		t.Fatalf("acquired = %+v, want the interrupted acquire resumed", got)
+	}
+	if r := fx.record(t, "1"); r.Status != store.Acquired || r.CandidateRef != "130" || r.Source != "Src" {
+		t.Fatalf("record = %+v", r)
+	}
+}
+
+func TestResumeRespectsDryRunAndKeepsRecordOnError(t *testing.T) {
+	fx := newFixture(t, entry("1", "Frieren", core.StatusPlanning, nil))
+	fx.dl.Search["1"] = core.Candidate{Ref: "130", Title: "Frieren", SourceName: "Src"}
+	fx.dl.SetAcquireErr(errors.New("down"))
+	_ = fx.s.Run(t.Context())
+
+	if err := fx.s.Run(t.Context()); err == nil { // resume fails again
+		t.Fatal("expected error")
+	}
+	if r := fx.record(t, "1"); r.Status != store.InProgress || r.CandidateRef != "130" || r.Source != "Src" {
+		t.Fatalf("record = %+v", r)
+	}
+
+	fx.dl.SetAcquireErr(nil)
+	fx.s.DryRun = true
+	fx.run(t)
+	if len(fx.dl.AcquiredCandidates()) != 0 || fx.record(t, "1").Status != store.InProgress {
+		t.Fatal("dry run must neither acquire nor change the record")
+	}
+}
