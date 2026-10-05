@@ -82,8 +82,7 @@ type EntryUpdate struct { // nil fields are left unchanged
 ```go
 type Reader interface {
     Name() string
-    ListStartedSeries(ctx context.Context) ([]Series, error) // series with any read progress
-    ListAllSeries(ctx context.Context) ([]Series, error)     // every series, with IDs; used for "already have it"
+    ListAllSeries(ctx context.Context) ([]Series, error) // every series, with IDs; reconcile queues all of them, and used for "already have it"
     GetSeries(ctx context.Context, ref string) (Series, error)
     GetProgress(ctx context.Context, ref string) (ReadProgress, error)
 }
@@ -147,19 +146,19 @@ Normalized statuses, what sets them, and what the downloader does (defaults):
 | Status (MangaBaka) | Set from the reader? | Overwritten from the reader? | Downloader action |
 |---|---|---|---|
 | `considering` | Never | Yes → `reading`/`completed` once reading starts | None |
-| `planning` (`plan_to_read`) | Never | Yes → `reading`/`completed` once reading starts | **Acquire** (if not already had) |
+| `planning` (`plan_to_read`) | Created for a series that is in the reader but not in the tracker list yet and has nothing read or opened; an existing entry is never touched | Yes → `reading`/`completed` once reading starts | **Acquire** (if not already had) |
 | `reading` | `IN_PROGRESS`, or all read while still publishing | Progress only goes up; → `completed` when finished | **Acquire** (if not already had) |
 | `rereading` | Never | Never (protected) | **Acquire** (if not already had) |
 | `completed` | All read and publication ended | Never (protected) | None |
 | `paused` | Never | Never (protected) | None |
 | `dropped` | Never | Never (protected) | **Release** (remove from library, keep files) |
-| not in list | Created as `reading`/`completed` once the reader shows progress | — | None |
+| not in list | Created as `reading`/`completed` once the reader shows progress; created as `planning` while nothing is read or opened | — | None |
 
 Reader → tracker:
 
 | Reader state | Tracker status | Progress |
 |---|---|---|
-| nothing read or opened | no action | — |
+| nothing read or opened (`BooksRead == 0`, `BooksInProgress == 0`) | `planning` (`plan_to_read`), **only if the series is not in the tracker list yet**; an existing entry of any status is left untouched | none, no dates |
 | first book(s) only partly read (`BooksRead == 0`, `BooksInProgress > 0`) | `reading` | none |
 | some books read | `reading` | `LastReadNumber` |
 | all read, still publishing | `reading` | `MaxNumber` |
@@ -178,7 +177,7 @@ The acquire/release status sets are configurable (`ACQUIRE_STATUSES`, `RELEASE_S
 Single Go binary, Kubernetes Deployment (1 replica), three loops:
 
 1. **Watcher** — only if the reader implements `ProgressWatcher`. Each emitted series ref is debounced (`SSE_DEBOUNCE`, default 10s) then queued for progress sync. On channel close: reconnect with backoff (1s → 60s cap).
-2. **Reconcile** (`RECONCILE_INTERVAL`, default 1h, plus once at startup) — queues every series from `ListStartedSeries`.
+2. **Reconcile** (`RECONCILE_INTERVAL`, default 1h, plus once at startup) — queues every series from `ListAllSeries` (unstarted ones included, so they can be planned).
 3. **Download sync** (`DOWNLOAD_INTERVAL`, default 15m, plus once at startup) — only if `DOWNLOAD_TRACKER` and `DOWNLOADER` are set.
 
 Progress sync runs on one worker goroutine fed by a deduplicating queue, so watcher and reconcile never sync the same series concurrently.
@@ -195,9 +194,10 @@ For one reader series, for each tracker in `TRACKERS` (failures in one tracker d
    - `BooksRead == 0`, `BooksInProgress > 0` → `reading`, no progress.
    - Publication status comes from the tracker, not the reader: Komga's `metadata.status` defaults to `ONGOING` for series without metadata (seen live on finished series), so it can't be trusted.
    - `BooksTotal` can exceed `MaxNumber` (duplicate scanlations, chapter 0), so "all read" uses the book counts and progress uses the numbers.
-   - else → no action.
+   - `BooksRead == 0`, `BooksInProgress == 0` (and `BooksTotal > 0`) → `planning`, no progress, no dates. A series without any books gives no target.
    - Progress goes in `Chapter` or `Volume` per `ReadProgress.Unit`.
 3. **Decide** against the current entry (`GetEntry`):
+   - A `planning` target only creates a missing entry: with no current entry the update is `status = planning` and nothing else; with any current entry (whatever its status, progress or dates) the result is nil. It never modifies an existing MangaBaka entry. This is an early branch, so the rules below only apply to `reading`/`completed` targets.
    - Protected: if current status is `paused`, `dropped`, `completed`, `rereading` or `unknown` → do nothing.
    - Status may move: none/`considering`/`planning` → `reading`/`completed`; `reading` → `completed`. Never backwards.
    - Never lower progress: only send progress if target > current (or current is nil).
@@ -232,6 +232,8 @@ Each poll: `ListLibrary(ACQUIRE_STATUSES ∪ RELEASE_STATUSES)`, `reader.ListAll
 **Status in `RELEASE_STATUSES`:**
 1. Record is `released` → skip.
 2. `FindInLibrary` hit → `Release` → store `released`. Miss → store `released` (nothing to remove).
+
+Unstarted reader series show up in the tracker as `planning` (see *Status lifecycle*), which is an acquire status, but they are skipped here because they are already in the downloader library or the reader (steps 3 and 4), so no download is started for them.
 
 Any other status → nothing. A record flips between `acquired` and `released` as the tracker status changes, so dropped → WTR acquires again, and WTR → dropped releases.
 
@@ -287,8 +289,7 @@ Adapter-specific vars are prefixed with the adapter name and only read when that
 Env: `KOMGA_URL`, `KOMGA_API_KEY`, `KOMGA_VOLUME_LIBRARIES` (comma-separated library IDs whose books are volumes; default empty = all chapters).
 
 - Auth header `X-API-Key`.
-- `ListStartedSeries`: `POST /api/v1/series/list?unpaged=true` with condition `anyOf readStatus is IN_PROGRESS / READ`.
-- `ListAllSeries`: same endpoint with `{}`; the list response already includes `metadata.title`, `alternateTitles` and `links`, so no per-series calls.
+- `ListAllSeries`: `POST /api/v1/series/list?unpaged=true` with `{}`; the list response already includes `metadata.title`, `alternateTitles` and `links`, so no per-series calls.
 - `GetSeries`: `GET /api/v1/series/{id}` → `metadata.title`, `metadata.alternateTitles`, `libraryId`; `IDs` from `metadata.links[].url` via `match.ParseLink`. Parse by URL, not label: live labels are `AniList`, `MangaUpdates`, `MyAnimeList`, `Kitsu`, `Anime-Planet`, `MangaDex`, plus shop/official links to ignore. No `MangaBaka` links exist on the live instance, and 16 of 28 series have no links at all, so title search is a primary path, not an edge case.
 - `GetProgress`: `GET /api/v2/series/{id}/read-progress/tachiyomi` → `lastReadContinuousNumberSort`, `maxNumberSort`, `booksCount`, `booksReadCount`, `booksInProgressCount`. Unit = volume if library in `KOMGA_VOLUME_LIBRARIES`, else chapter. When `booksReadCount + booksInProgressCount > 0`, two more calls fetch the dates: `POST /api/v1/books/list?size=1&sort=readProgress.readDate,asc` and `…,desc` with condition `allOf [seriesId is <ref>, anyOf [readStatus is READ, readStatus is IN_PROGRESS]]`; `content[0].readProgress.readDate` (RFC 3339) gives `FirstReadAt` (asc) and `LastReadAt` (desc). No extra calls when nothing is read or in progress.
 - `WatchProgress`: SSE `GET /sse/v1/events` with `X-API-Key` (verified: 200, `text/event-stream`). Format is `event:<Type>\ndata:<json>\n\n`; ignore other types (e.g. `TaskQueueStatus`). Emit `seriesId` from `ReadProgressSeriesChanged` / `ReadProgressSeriesDeleted`. Events are delivered only to the owning user, so the API key must belong to the reading user.
@@ -303,7 +304,7 @@ Env: `MANGABAKA_TOKEN` (Personal Access Token, `mb-…`).
 - `GetEntry`: `GET /v1/my/library/{id}` (404 → nil). `SaveEntry`: `PATCH` (or `POST` if absent) with `state`, `progress_chapter`, `progress_volume`, `start_date`, `finish_date` (`YYYY-MM-DD`). `GetEntry` reads the first 10 characters of `start_date` / `finish_date` (the API may return `2026-06-06` or a full timestamp).
 - `ListLibrary`: `GET /v2/my/library?state=<s>&limit=100` (paged), once per requested MangaBaka state (or unfiltered and filtered locally if the API rejects repeated `state`). Must be v2: v1 list items carry no series ID. v2 items are `{entry, lists, series}` with the full series object (`id`, titles, `secondary_titles`, `source`).
 - Progress fields are JSON numbers with no `multipleOf` in the spec, so decimals (e.g. 10.5) are sent as-is. A submitted `0` is stored as null.
-- Status map: `considering` → considering; `plan_to_read` → planning; `reading` → reading; `completed` → completed; `paused`, `on_hold` → paused; `dropped` → dropped; `rereading` → rereading; else unknown. Reverse is the same table (only `reading`/`completed` are ever written).
+- Status map: `considering` → considering; `plan_to_read` → planning; `reading` → reading; `completed` → completed; `paused`, `on_hold` → paused; `dropped` → dropped; `rereading` → rereading; else unknown. Reverse is the same table (only `reading`/`completed`/`planning` are ever written, and `planning` only to create a missing entry).
 - Rate limits: search 25/min, others 150/min (API limits are 30 / 180 per IP).
 
 ### Downloader `suwayomi` (implements `Downloader`)

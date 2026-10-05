@@ -5,7 +5,7 @@ library statuses. Design: `docs/superpowers/specs/2026-10-05-mangasync-design.md
 
 | MangaBaka status | Komga sets it? | Suwayomi action |
 |---|---|---|
-| plan to read / reading / rereading | reading from Komga progress | add + download all, unless already in Suwayomi or Komga |
+| plan to read / reading / rereading | reading from Komga progress; plan to read for series in Komga you haven't started, only if not in your MangaBaka list yet (existing entries are never changed) | add + download all, unless already in Suwayomi or Komga |
 | completed | when everything is read and publication ended | none |
 | dropped | never (yours) | removed from library, files kept |
 | considering / paused | never | none |
