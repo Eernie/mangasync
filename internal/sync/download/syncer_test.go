@@ -293,3 +293,26 @@ func TestRunStopsWhenContextCancelled(t *testing.T) {
 		t.Fatalf("find calls = %d, want 0", fx.dl.FindCallCount())
 	}
 }
+
+func TestManagedMarkerSurvivesNotFoundRetries(t *testing.T) {
+	fx := newFixture(t, entry("1", "Fire Force", core.StatusDropped, nil))
+	fx.dl.Library["1"] = core.Candidate{Ref: "50", Title: "Fire Force", SourceName: "Src"}
+	fx.run(t) // released, record keeps ref 50
+
+	// Back to planning; the kept files are in the reader; the source search misses once.
+	fx.reader.Series["K1"] = core.Series{Ref: "K1", Title: "Fire Force"}
+	fx.tr.SetLibrary([]core.LibraryEntry{entry("1", "Fire Force", core.StatusPlanning, nil)})
+	fx.dl.SetLibrary(map[string]core.Candidate{})
+	fx.run(t)
+	r := fx.record(t, "1")
+	if r.Status != store.NotFound || r.CandidateRef != "50" || r.Source != "Src" {
+		t.Fatalf("after miss: %+v", r)
+	}
+
+	fx.now = fx.now.Add(25 * time.Hour)
+	fx.dl.Search["1"] = core.Candidate{Ref: "50", Title: "Fire Force", SourceName: "Src"}
+	fx.run(t)
+	if len(fx.dl.AcquiredCandidates()) != 1 || fx.record(t, "1").Status != store.Acquired {
+		t.Fatalf("expected acquire after backoff; acquired=%v", fx.dl.AcquiredCandidates())
+	}
+}

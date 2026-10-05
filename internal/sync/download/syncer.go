@@ -101,7 +101,7 @@ func (s *Syncer) acquire(ctx context.Context, e core.LibraryEntry, readerSeries 
 	// Released files stay on disk and so in the reader. If our own record shows we managed
 	// this series in the downloader, the reader copy is ours and must not block re-acquiring.
 	managedByUs := rec != nil && rec.CandidateRef != "" &&
-		(rec.Status == store.Released || rec.Status == store.InProgress)
+		(rec.Status == store.Released || rec.Status == store.InProgress || rec.Status == store.NotFound)
 	if !managedByUs {
 		for _, rs := range readerSeries {
 			if match.SameSeries(rs, e.Series, s.Threshold) {
@@ -122,7 +122,11 @@ func (s *Syncer) acquire(ctx context.Context, e core.LibraryEntry, readerSeries 
 		}
 		retry := s.now().Add(NotFoundBackoff(attempts))
 		log.Warn("not found in downloader", "near_misses", describe(near), "attempts", attempts, "retry_after", retry)
-		return s.save(ctx, e, store.NotFound, nil, attempts, retry)
+		var prev *core.Candidate // keep the managed-by-us marker across misses
+		if managedByUs {
+			prev = &core.Candidate{Ref: rec.CandidateRef, SourceName: rec.Source}
+		}
+		return s.save(ctx, e, store.NotFound, prev, attempts, retry)
 	}
 
 	log.Info("acquiring", "candidate", best.Title, "candidate_ref", best.Ref, "source", best.SourceName, "score", best.Score)
