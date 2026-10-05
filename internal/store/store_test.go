@@ -83,3 +83,31 @@ func TestDownloadRoundTripAndPersistence(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 }
+
+func TestMatchedTrackerIDs(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, filepath.Join(t.TempDir(), "s.db"))
+	put := func(reader, ref, tracker, id string, st MatchStatus) {
+		t.Helper()
+		if err := s.PutMapping(ctx, SeriesMapping{Reader: reader, ReaderRef: ref, Tracker: tracker, TrackerID: id, Status: st}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("komga", "K1", "mangabaka", "5", Matched)
+	put("komga", "K2", "mangabaka", "", Unmatched)
+	put("komga", "K3", "anilist", "77", Matched)
+	put("kavita", "V1", "mangabaka", "9", Matched)
+
+	got, err := s.MatchedTrackerIDs(ctx, "komga", "mangabaka")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got["5"] != "K1" {
+		t.Fatalf("got %v, want only tracker 5 -> K1", got)
+	}
+
+	empty, err := s.MatchedTrackerIDs(ctx, "komga", "nobody")
+	if err != nil || empty == nil || len(empty) != 0 {
+		t.Fatalf("no rows: got %v, %v; want empty non-nil map", empty, err)
+	}
+}

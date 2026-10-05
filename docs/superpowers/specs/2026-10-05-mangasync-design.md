@@ -169,6 +169,8 @@ Typical flow: mark WTR → acquired and downloaded → appears in Komga → read
 "Already had" means either of:
 - found in the downloader's library (`FindInLibrary`), or
 - present in the reader: a reader series (`ListAllSeries`, fetched once per poll) shares any cross-reference ID with the tracker series, or matches its titles at ≥ `MATCH_THRESHOLD`. This prevents duplicate downloads of series added to Komga outside Suwayomi.
+  - or the tracker series is the one progress sync matched to a reader series (`series_map` row with status `matched`, loaded once per poll via `MatchedTrackerIDs`) that is still in the reader. This covers matches made by title search where the shared IDs conflict, and merged tracker IDs. A mapping to a reader series that no longer exists is ignored.
+  - Both reader checks are skipped when our own download record shows we managed the series (kept files of a released series must not block re-acquiring).
 
 The acquire/release status sets are configurable (`ACQUIRE_STATUSES`, `RELEASE_STATUSES`).
 

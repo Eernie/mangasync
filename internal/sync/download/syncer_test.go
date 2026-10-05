@@ -466,3 +466,64 @@ func TestListFailuresAreLoggedOnceAtError(t *testing.T) {
 		})
 	}
 }
+
+func putMapping(t *testing.T, fx *fixture, readerRef, trackerID string) {
+	t.Helper()
+	err := fx.st.PutMapping(t.Context(), store.SeriesMapping{Reader: "komga", ReaderRef: readerRef,
+		Tracker: "mangabaka", TrackerID: trackerID, Status: store.Matched})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Progress sync resolved K1 to tracker series 5 by title search, although their AniList IDs
+// conflict: SameSeries says "different", the mapping says "same". No duplicate download.
+func TestMappedReaderSeriesIsAlreadyInReader(t *testing.T) {
+	fx := newFixture(t, entry("5", "Naruto", core.StatusPlanning, core.IDs{core.IDAniList: "30011"}))
+	fx.reader.Series["K1"] = core.Series{Ref: "K1", Title: "Naruto", IDs: core.IDs{core.IDAniList: "999"}}
+	fx.dl.Search["5"] = core.Candidate{Ref: "7", Title: "Naruto"}
+	putMapping(t, fx, "K1", "5")
+
+	fx.run(t)
+
+	if fx.dl.FindCallCount() != 0 || len(fx.dl.AcquiredCandidates()) != 0 {
+		t.Fatalf("find=%d acquired=%v; want none", fx.dl.FindCallCount(), fx.dl.AcquiredCandidates())
+	}
+	if fx.record(t, "5") != nil {
+		t.Fatal("already-in-reader must not write a record")
+	}
+}
+
+// A mapping to a reader series that was deleted from the reader must not block acquiring.
+func TestMappedReaderSeriesThatNoLongerExistsDoesNotBlock(t *testing.T) {
+	fx := newFixture(t, entry("5", "Naruto", core.StatusPlanning, core.IDs{core.IDAniList: "30011"}))
+	fx.dl.Search["5"] = core.Candidate{Ref: "7", Title: "Naruto"}
+	putMapping(t, fx, "K1", "5") // K1 is gone from the reader
+
+	fx.run(t)
+
+	if got := fx.dl.AcquiredCandidates(); len(got) != 1 || got[0].Ref != "7" {
+		t.Fatalf("acquired = %+v, want candidate 7", got)
+	}
+}
+
+// Kept files of a released series stay in the reader (and in the mapping): still re-acquirable.
+func TestMappedReaderSeriesDoesNotBlockReacquireWhenManagedByUs(t *testing.T) {
+	fx := newFixture(t, entry("5", "Fire Force", core.StatusDropped, nil))
+	fx.dl.Library["5"] = core.Candidate{Ref: "50", Title: "Fire Force", SourceName: "Src"}
+	fx.run(t)
+	if r := fx.record(t, "5"); r.Status != store.Released || r.CandidateRef != "50" {
+		t.Fatalf("record = %+v", r)
+	}
+
+	fx.reader.Series["K1"] = core.Series{Ref: "K1", Title: "Fire Force", IDs: core.IDs{core.IDAniList: "999"}}
+	putMapping(t, fx, "K1", "5")
+	fx.tr.SetLibrary([]core.LibraryEntry{entry("5", "Fire Force", core.StatusPlanning, core.IDs{core.IDAniList: "30011"})})
+	fx.dl.SetLibrary(map[string]core.Candidate{})
+	fx.dl.Search["5"] = core.Candidate{Ref: "50", Title: "Fire Force"}
+	fx.run(t)
+
+	if got := fx.dl.AcquiredCandidates(); len(got) != 1 || got[0].Ref != "50" {
+		t.Fatalf("re-acquired = %+v", got)
+	}
+}

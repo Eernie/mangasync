@@ -51,10 +51,15 @@ func (s *Syncer) Run(ctx context.Context) error {
 		return fmt.Errorf("list tracker library: %w", err)
 	}
 	var readerSeries []core.Series
+	var mapped map[string]bool // tracker IDs progress sync matched to a series that is in the reader
 	if len(s.Acquire) > 0 {
 		if readerSeries, err = s.Reader.ListAllSeries(ctx); err != nil {
 			s.Log.Error("download sync failed", "step", "list reader series", "err", err)
 			return fmt.Errorf("list reader series: %w", err)
+		}
+		if mapped, err = s.mappedInReader(ctx, readerSeries); err != nil {
+			s.Log.Error("download sync failed", "step", "load series mappings", "err", err)
+			return fmt.Errorf("load series mappings: %w", err)
 		}
 	}
 	var errs []error
@@ -65,7 +70,7 @@ func (s *Syncer) Run(ctx context.Context) error {
 		var err error
 		switch {
 		case slices.Contains(s.Acquire, e.Status):
-			err = s.acquire(ctx, e, readerSeries)
+			err = s.acquire(ctx, e, readerSeries, mapped)
 		case slices.Contains(s.Release, e.Status):
 			err = s.release(ctx, e)
 		}
@@ -77,7 +82,27 @@ func (s *Syncer) Run(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func (s *Syncer) acquire(ctx context.Context, e core.LibraryEntry, readerSeries []core.Series) error {
+// mappedInReader returns the tracker IDs that progress sync matched to a series still in the
+// reader. A mapping to a series deleted from the reader is ignored.
+func (s *Syncer) mappedInReader(ctx context.Context, readerSeries []core.Series) (map[string]bool, error) {
+	ids, err := s.Store.MatchedTrackerIDs(ctx, s.Reader.Name(), s.Tracker.Name())
+	if err != nil {
+		return nil, err
+	}
+	inReader := make(map[string]bool, len(readerSeries))
+	for _, rs := range readerSeries {
+		inReader[rs.Ref] = true
+	}
+	out := make(map[string]bool, len(ids))
+	for trackerID, readerRef := range ids {
+		if inReader[readerRef] {
+			out[trackerID] = true
+		}
+	}
+	return out, nil
+}
+
+func (s *Syncer) acquire(ctx context.Context, e core.LibraryEntry, readerSeries []core.Series, mapped map[string]bool) error {
 	log := s.logFor(e)
 	rec, err := s.Store.GetDownload(ctx, s.Tracker.Name(), e.Series.Ref, s.Downloader.Name())
 	if err != nil {
@@ -111,6 +136,12 @@ func (s *Syncer) acquire(ctx context.Context, e core.LibraryEntry, readerSeries 
 	managedByUs := rec != nil && rec.CandidateRef != "" &&
 		(rec.Status == store.Released || rec.Status == store.InProgress || rec.Status == store.NotFound)
 	if !managedByUs {
+		// Progress sync may have matched a reader series to this tracker series by title search
+		// even though their shared IDs conflict (or the tracker series was merged): trust that.
+		if mapped[e.Series.Ref] {
+			log.Debug("already in reader (mapped)")
+			return nil
+		}
 		for _, rs := range readerSeries {
 			if match.SameSeries(rs, e.Series, s.Threshold) {
 				log.Debug("already in reader", "reader_series", rs.Title)
