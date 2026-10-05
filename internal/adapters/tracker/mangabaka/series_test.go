@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -274,6 +275,47 @@ func TestResolveSearchSkipsDeletedAndFollowsMerged(t *testing.T) {
 		id, found, err := c.Resolve(t.Context(), core.Series{Title: tc.title})
 		if err != nil || id != tc.wantID || found != tc.found {
 			t.Errorf("%s: got %q, %v, %v; want %q, %v", tc.title, id, found, err, tc.wantID, tc.found)
+		}
+	}
+}
+
+func TestResolveSearchRetriesWithoutEditionSuffix(t *testing.T) {
+	var queries []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/series/search", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query().Get("q")
+		queries = append(queries, q)
+		switch q {
+		case "Naruto":
+			io.WriteString(w, `{"status":200,"data":[
+				{"id":30,"state":"active","title":"Naruto"},
+				{"id":31,"state":"active","title":"Naruto (Novel)"}]}`)
+		case "Bleach (Color)": // the suffixed query already finds the original
+			io.WriteString(w, `{"status":200,"data":[{"id":40,"state":"active","title":"Bleach"}]}`)
+		default:
+			io.WriteString(w, `{"status":200,"data":[]}`)
+		}
+	})
+	c, _ := newTestClient(t, mux)
+	cases := []struct {
+		title       string
+		wantID      string
+		found       bool
+		wantQueries []string
+	}{
+		{"Naruto (Color)", "30", true, []string{"Naruto (Color)", "Naruto"}},
+		{"Bleach (Color)", "40", true, []string{"Bleach (Color)"}},
+		{"Nothing (Color)", "", false, []string{"Nothing (Color)", "Nothing"}},
+		{"Nothing Here", "", false, []string{"Nothing Here"}},
+	}
+	for _, tc := range cases {
+		queries = nil
+		id, found, err := c.Resolve(t.Context(), core.Series{Title: tc.title})
+		if err != nil || id != tc.wantID || found != tc.found {
+			t.Errorf("%s: got %q, %v, %v; want %q, %v", tc.title, id, found, err, tc.wantID, tc.found)
+		}
+		if !slices.Equal(queries, tc.wantQueries) {
+			t.Errorf("%s: search queries = %q, want %q", tc.title, queries, tc.wantQueries)
 		}
 	}
 }

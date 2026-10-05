@@ -251,19 +251,34 @@ func (c *Client) followMerged(ctx context.Context, id string) (string, bool, err
 	return "", false, nil // merge chain too long or cyclic
 }
 
+// searchTitle searches by the main title. A coloured edition ("Naruto (Color)") is also
+// scored against, and if needed searched as, the original series ("Naruto").
 func (c *Client) searchTitle(ctx context.Context, s core.Series) (string, bool, error) {
 	if s.Title == "" {
 		return "", false, nil
 	}
-	q := url.Values{"q": {s.Title}, "limit": {"10"}}
+	want := s.Titles()
+	stripped, hasEdition := match.StripEdition(s.Title)
+	if hasEdition {
+		want = append(want, stripped)
+	}
+	if id, found, err := c.searchOnce(ctx, s.Title, want); err != nil || found || !hasEdition {
+		return id, found, err
+	}
+	return c.searchOnce(ctx, stripped, want)
+}
+
+// searchOnce runs one title search and accepts the best candidate scoring against want.
+func (c *Client) searchOnce(ctx context.Context, query string, want []string) (string, bool, error) {
+	q := url.Values{"q": {query}, "limit": {"10"}}
 	var env struct {
 		Data []seriesDTO `json:"data"`
 	}
 	if err := c.search.DoJSON(ctx, http.MethodGet, c.url("/v1/series/search?"+q.Encode()), c.header(), nil, &env); err != nil {
-		return "", false, fmt.Errorf("search %q: %w", s.Title, err)
+		return "", false, fmt.Errorf("search %q: %w", query, err)
 	}
 	hits := slices.DeleteFunc(env.Data, func(d seriesDTO) bool { return d.State == "deleted" })
-	best, _ := match.Best(s.Titles(), hits, func(d seriesDTO) []string { return d.toCore().Titles() }, c.cfg.Threshold)
+	best, _ := match.Best(want, hits, func(d seriesDTO) []string { return d.toCore().Titles() }, c.cfg.Threshold)
 	if best == nil {
 		return "", false, nil
 	}
