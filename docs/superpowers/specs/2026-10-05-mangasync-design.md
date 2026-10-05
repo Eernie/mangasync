@@ -347,7 +347,8 @@ Expected shapes, to confirm when built: Kavita (REST + JWT/API key, SignalR hub 
 ## Deployment
 
 - Multi-stage `Dockerfile` → `gcr.io/distroless/static:nonroot`, `CGO_ENABLED=0`.
-- `deploy/` Kustomize base: Deployment (replicas 1, `strategy: Recreate`, non-root, read-only root FS, `/data` from PVC), PVC (100Mi, RWO), ConfigMap, example Secret with placeholders, liveness/readiness on `/healthz`. Requests ~10m CPU / 32Mi memory.
+- No manifests in the repo: users deploy with their own chart or the bjw-s app-template (README documents the requirements and example values): 1 replica, `Recreate`, non-root 65532, read-only root FS, `/data` PVC (100Mi, RWO), `/tmp` emptyDir, `/healthz` probes. Requests ~10m CPU / 32Mi memory.
+- Image: built and pushed to `ghcr.io/<owner>/<repo>` by GitHub Actions (`.github/workflows/build.yml`), multi-arch amd64/arm64 via cross-compilation.
 - Logs: JSON via `log/slog` with `series`, `reader`, `tracker`, `downloader`, `action`, `dry_run` fields.
 
 ## Testing
